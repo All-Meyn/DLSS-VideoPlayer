@@ -31,7 +31,8 @@ public:
     bool IsNvidia() const { return m_isNvidia; }
     const std::wstring& AdapterName() const { return m_adapterName; }
 
-    static constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+    // RGBA (not BGRA) so the RTX Video SDK's RGBA8 output can be copied straight in.
+    static constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
 private:
     ComPtr<ID3D11Device> m_device;

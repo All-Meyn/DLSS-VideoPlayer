@@ -53,6 +53,8 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
         return 1;
     }
     m_initialized = true;
+    if (m_renderer.HasRtxVideoSdk())
+        m_mode = UpscaleMode::RtxVideoSdk; // prefer the SDK when it initialized
 
     DragAcceptFiles(m_hwnd, TRUE);
     ShowWindow(m_hwnd, showCmd);

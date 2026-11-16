@@ -69,11 +69,40 @@ if(DLSSVP_WITH_RTX_VIDEO_SDK)
         message(FATAL_ERROR "DLSSVP_WITH_RTX_VIDEO_SDK=ON requires -DRTX_VIDEO_SDK_DIR=<path>.")
     endif()
     target_compile_definitions(DLSSVideoPlayer PRIVATE DLSSVP_HAS_RTX_VIDEO_SDK=1)
-    # The SDK's exact folder layout and library names should be checked against
-    # the version you download; adjust these two lines if they differ.
-    target_include_directories(DLSSVideoPlayer PRIVATE "${RTX_VIDEO_SDK_DIR}/include")
-    file(GLOB _rtxvsdk_libs "${RTX_VIDEO_SDK_DIR}/lib/*.lib")
-    target_link_libraries(DLSSVideoPlayer PRIVATE ${_rtxvsdk_libs})
+
+    # Headers: wherever nvsdk_ngx_helpers_vsr.h lives inside the SDK.
+    file(GLOB_RECURSE _ngx_hdr "${RTX_VIDEO_SDK_DIR}/nvsdk_ngx_helpers_vsr.h")
+    if(NOT _ngx_hdr)
+        message(FATAL_ERROR "nvsdk_ngx_helpers_vsr.h not found under RTX_VIDEO_SDK_DIR=${RTX_VIDEO_SDK_DIR}")
+    endif()
+    list(GET _ngx_hdr 0 _ngx_hdr)
+    get_filename_component(_ngx_inc "${_ngx_hdr}" DIRECTORY)
+    target_include_directories(DLSSVideoPlayer PRIVATE "${_ngx_inc}")
+
+    # Import library: nvsdk_ngx_d.lib (dynamic CRT, matches CMake's default /MD).
+    # Override with -DRTX_VIDEO_SDK_LIB=<path> if your SDK names it differently.
+    if(NOT RTX_VIDEO_SDK_LIB)
+        file(GLOB_RECURSE _ngx_libs "${RTX_VIDEO_SDK_DIR}/nvsdk_ngx_d.lib")
+        if(NOT _ngx_libs)
+            message(FATAL_ERROR "nvsdk_ngx_d.lib not found under ${RTX_VIDEO_SDK_DIR}; set -DRTX_VIDEO_SDK_LIB=<path to .lib>")
+        endif()
+        list(GET _ngx_libs 0 RTX_VIDEO_SDK_LIB)
+    endif()
+    message(STATUS "RTX Video SDK: include ${_ngx_inc}, lib ${RTX_VIDEO_SDK_LIB}")
+    target_link_libraries(DLSSVideoPlayer PRIVATE "${RTX_VIDEO_SDK_LIB}")
+
+    # Runtime: NGX loads its feature DLLs (nvngx_*.dll) from the executable's folder.
+    # Copy the release DLLs (skip any "dev"/debug builds) next to the exe.
+    file(GLOB_RECURSE _ngx_dlls "${RTX_VIDEO_SDK_DIR}/*.dll")
+    list(FILTER _ngx_dlls INCLUDE REGEX "nvngx")
+    list(FILTER _ngx_dlls EXCLUDE REGEX "[/\\\\]dev[/\\\\]")
+    if(_ngx_dlls)
+        message(STATUS "RTX Video SDK runtime DLLs: ${_ngx_dlls}")
+        add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_ngx_dlls} $<TARGET_FILE_DIR:DLSSVideoPlayer>)
+    else()
+        message(WARNING "No nvngx*.dll found in the RTX Video SDK; copy the VSR runtime DLL next to the exe manually.")
+    endif()
 endif()
 
 # Copy FFmpeg runtime DLLs next to the executable so it runs from the build tree.

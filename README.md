@@ -16,7 +16,7 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | FFmpeg demux + D3D11VA GPU decode (H.264, HEVC, VP9, AV1 - whatever your GPU decodes) | done |
 | YUV->RGB, scaling, aspect ratio / letterboxing via D3D11 Video Processor | done |
 | **RTX VSR via NVIDIA driver** (D3D11 stream extension, the same path Chrome/VLC use) | done |
-| **RTX Video SDK backend** | integration point in place; SDK calls still to be wired (`TODO(SDK)` in `src/upscalers/RtxVideoSdkUpscaler.cpp`) |
+| **RTX Video SDK backend** (NGX VSR feature, quality levels 1-4) | done, used by default when it initializes |
 | Play / pause / seek, frame pacing to vsync | done |
 | Audio, A/V sync | not yet (milestone 2) |
 | HDR output, interlaced content, software-decode fallback | not yet |
@@ -41,15 +41,18 @@ cmake --build build --config Release
 build\Release\DLSSVideoPlayer.exe path\to\video.mkv
 ```
 
-With the RTX Video SDK (once the `TODO(SDK)` calls are filled in):
+With the RTX Video SDK (v1.1):
 
 ```bat
 cmake -S . -B build -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg-7.1-shared ^
       -DDLSSVP_WITH_RTX_VIDEO_SDK=ON -DRTX_VIDEO_SDK_DIR=C:/Users/<you>/Downloads/RTX_Video_SDK_v1.1.0
 ```
 
-The FFmpeg DLLs are copied next to the executable after each build. The RTX Video SDK may also
-ship runtime DLLs that need to sit next to the executable; check its documentation.
+The FFmpeg DLLs are copied next to the executable after each build. With the SDK enabled, CMake also
+finds the NGX headers (`nvsdk_ngx_helpers_vsr.h`), links `nvsdk_ngx_d.lib`, and copies the SDK's
+`nvngx*.dll` runtime files next to the executable; the configure output prints what it found. If your
+SDK names the library differently, pass `-DRTX_VIDEO_SDK_LIB=<path to .lib>`.
+NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 
 ## Controls
 
@@ -58,8 +61,8 @@ ship runtime DLLs that need to sit next to the executable; check its documentati
 | `O` / drag & drop | Open a file |
 | `Space` | Play / pause (at end: replay) |
 | `Left` / `Right` | Seek -5 s / +5 s (`Shift`: 30 s) |
-| `U` | Cycle upscaler: Off -> RTX VSR (driver) -> RTX Video SDK (if built) |
-| `1`-`4` | Quality level (RTX Video SDK backend) |
+| `U` | Cycle upscaler: Off -> RTX VSR (driver) -> RTX Video SDK (if built and initialized) |
+| `1`-`4` | VSR quality: Low / Medium / High / Ultra (RTX Video SDK backend) |
 | `F`, `Alt+Enter`, double-click | Toggle fullscreen (`Esc` leaves) |
 
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.
@@ -88,7 +91,7 @@ Diagnostics go to the debugger output (Visual Studio Output window or Sysinterna
 - `src/VideoDecoder.*`: FFmpeg demux/decode with zero-copy D3D11 surfaces on the shared device
 - `src/VideoProcessor.*`: D3D11 Video Processor wrapper, color spaces, NVIDIA driver VSR extension
 - `src/Renderer.*`: picks the upscaling path, letterboxing, presentation
-- `src/upscalers/`: pluggable texture-to-texture upscalers (RTX Video SDK backend)
+- `src/upscalers/`: pluggable texture-to-texture upscalers (RTX Video SDK / NGX VSR backend)
 
 ## Licensing
 
