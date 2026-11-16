@@ -1,0 +1,7 @@
+build/
+out/
+.vs/
+*.user
+CMakeUserPresets.json
+# Third-party SDKs and FFmpeg builds are not committed
+third_party/

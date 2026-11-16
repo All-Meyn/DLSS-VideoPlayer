@@ -1,0 +1,53 @@
+#pragma once
+
+#include "GpuDevice.h"
+#include "VideoDecoder.h"
+#include "VideoProcessor.h"
+#include "upscalers/IUpscaler.h"
+
+#include <memory>
+
+enum class UpscaleMode
+{
+    Off,         // Plain video-processor scaling (driver default, usually bilinear/bicubic).
+    DriverVsr,   // NVIDIA RTX Video Super Resolution via the driver's D3D11 stream extension.
+    RtxVideoSdk, // NVIDIA RTX Video SDK (only when built with the SDK).
+};
+
+const char* UpscaleModeName(UpscaleMode mode);
+
+// Turns decoded frames into a window-sized "presentation" texture, which is then
+// copied to the swap chain every vsync. Re-processing only happens when the frame,
+// window size or settings change.
+class Renderer
+{
+public:
+    bool Init(GpuDevice* gpu);
+    void OnResize();
+
+    bool HasRtxVideoSdk() const { return m_sdk != nullptr; }
+
+    // Processes `frame` with the selected mode into the presentation texture.
+    // `effectiveMode` receives the mode actually used (e.g. falls back to Off when downscaling).
+    bool RenderFrame(const VideoFrame& frame, AVRational sar, UpscaleMode mode, int quality,
+                     UpscaleMode& effectiveMode);
+    void RenderBlack();
+    void Present();
+
+    RECT LastDestRect() const { return m_destRect; }
+
+private:
+    bool EnsurePresentTexture();
+    bool EnsureTexture(ComPtr<ID3D11Texture2D>& tex, UINT w, UINT h, DXGI_FORMAT fmt, UINT bind);
+    RECT ComputeDestRect(int srcW, int srcH, AVRational sar) const;
+
+    GpuDevice* m_gpu = nullptr;
+    VideoProcessor m_vp;
+    std::unique_ptr<IUpscaler> m_sdk;
+
+    ComPtr<ID3D11Texture2D> m_present;      // window-sized, back-buffer format
+    ComPtr<ID3D11RenderTargetView> m_presentRtv;
+    ComPtr<ID3D11Texture2D> m_sdkInput;     // source-sized RGB (SDK path)
+    ComPtr<ID3D11Texture2D> m_sdkOutput;    // dest-rect-sized RGB (SDK path)
+    RECT m_destRect{};
+};
