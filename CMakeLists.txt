@@ -60,6 +60,8 @@ add_executable(VSRPlayer WIN32
     src/Overlay.h
     src/OutputPass.cpp
     src/OutputPass.h
+    src/PlaybackHistory.cpp
+    src/PlaybackHistory.h
     src/Renderer.cpp
     src/Renderer.h
     src/Settings.cpp

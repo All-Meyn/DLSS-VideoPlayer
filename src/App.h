@@ -6,11 +6,13 @@
 #include "GpuDevice.h"
 #include "Overlay.h"
 #include "OutputPass.h"
+#include "PlaybackHistory.h"
 #include "Renderer.h"
 #include "Settings.h"
 #include "Subtitles.h"
 #include "VideoDecoder.h"
 
+#include <cstdarg>
 #include <string>
 
 // Window, input, playback clock and the main loop.
@@ -59,6 +61,11 @@ private:
     const SubtitleTrack* CurrentSubtitleTrack() const;
     void ToggleMenu(OverlayPart menu);
 
+    // Per-file memory (resume position, tracks)
+    void SaveFileState();
+    std::wstring SubtitleChoiceKey() const;
+    int SubtitleChoiceFromKey(const std::wstring& key) const; // -1 = not found
+
     // Robustness
     void ReopenAudio(const char* reason);
     bool RecoverDevice();
@@ -75,6 +82,8 @@ private:
     float OsdOpacity(double now) const;
     OverlayState BuildOverlayState();
     void ShowOsd(const wchar_t* format, ...);
+    void ShowOsdFor(double seconds, const wchar_t* format, ...);
+    void ShowOsdV(double seconds, const wchar_t* format, va_list args);
     void ShowSeekOsd();
     void PresentFrame(); // back buffer <- video frame, overlay on top, Present
 
@@ -127,6 +136,12 @@ private:
     int m_subChoice = 0;
     OverlayPart m_openMenu = OverlayPart::None; // AudioButton / SubsButton
     int m_menuHover = -1;
+
+    // Per-file memory
+    PlaybackHistory m_history;
+    FileState m_savedState;      // history entry of the file being opened (path empty = none)
+    double m_resumeOffer = 0.0;  // position offered for resume (Enter accepts)
+    double m_resumeOfferUntil = 0.0;
 
     // Robustness
     AudioDeviceWatcher m_audioWatcher;

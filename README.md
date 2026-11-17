@@ -28,6 +28,7 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | Audio track selection (`A` / Audio menu) | done |
 | Subtitles: embedded text (SRT/ASS/WebVTT/mov_text, shown as plain outlined text) and image (PGS/VobSub) tracks, external `.srt/.ass/.ssa/.vtt` next to the video; `S` / Subs menu | done |
 | Robustness: audio follows default-device changes / device loss; GPU device reset recovery (rebuild + resume) | done |
+| Remembers volume / mute (`settings.ini`) and, per file, the position and audio / subtitle track (`%APPDATA%\\VSRPlayer\\history.txt`, last 500 files); reopening offers "Resume from ...? Press Enter" | done |
 | ASS styling (libass), HLG, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
@@ -83,6 +84,7 @@ NGX writes its logs to `%TEMP%\VSRPlayer`.
 | `Up` / `Down` | Volume +/- 5% |
 | `M` | Mute / unmute |
 | `H` | RTX Video HDR on/off (SDR videos on a display with Windows HDR on) |
+| `Enter` | Accept the "Resume from ...?" offer shown for a few seconds after opening a file |
 | `A` / `S` | Next audio track / next subtitle track (incl. off); also the Audio and Subs buttons on the control bar |
 | `T` | RTX Video HDR tuning panel (arrows select/adjust, Shift = fine steps, Esc/T closes; or drag the sliders) |
 | Mouse | Move to show the control bar (hides after 2.5 s; cursor hides too in fullscreen). Click/drag the seek bar (hover shows the time), drag the volume slider, click the buttons. Wheel = volume. Double-click the video = fullscreen. |
