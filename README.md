@@ -70,7 +70,8 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.
 Super resolution only runs when the video is being **enlarged**: e.g. a 1080p video in a 1080p window
 falls back to "Off". Use fullscreen on a 1440p/4K display, or play 480p-1080p content, to see it.
-Diagnostics go to the debugger output (Visual Studio Output window or Sysinternals DebugView).
+Diagnostics go to `%TEMP%\DLSSVideoPlayer\DLSSVideoPlayer.log` (recreated on each start) and to the debugger
+output (VS Code Debug Console, Visual Studio Output window or Sysinternals DebugView).
 
 ## Architecture
 
