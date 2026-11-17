@@ -1,8 +1,10 @@
 #pragma once
 
 #include "AudioPlayer.h"
+#include "DisplayInfo.h"
 #include "GpuDevice.h"
 #include "Overlay.h"
+#include "OutputPass.h"
 #include "Renderer.h"
 #include "VideoDecoder.h"
 
@@ -58,6 +60,9 @@ private:
     void ShowSeekOsd();
     void PresentFrame(); // back buffer <- video frame, overlay on top, Present
 
+    // SDR or HDR10 output, from the current file and the monitor the window is on.
+    void UpdateOutputMode();
+
     bool AdvancePlayback(); // returns true if the displayed frame changed
     void DecodeNext();
     void RenderNow();
@@ -74,10 +79,13 @@ private:
     GpuDevice m_gpu;
     Renderer m_renderer;
     Overlay m_overlay;
+    OutputPass m_outputPass;
     VideoDecoder m_decoder;
     AudioPlayer m_audio;
     bool m_initialized = false;
     bool m_deviceLost = false; // GPU device removed: rendering stops until restart
+    DisplayInfo m_display;
+    bool m_hdrOutput = false; // swap chain is HDR10 (PQ / BT.2020)
 
     // Playback state
     VideoFrame m_current;

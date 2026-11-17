@@ -18,8 +18,9 @@ public:
     // The area of `dst` outside `dstRect` is filled with black.
     // `colorInfo` supplies matrix / range / transfer metadata (may be null).
     // `nvidiaVsr` asks the NVIDIA driver to apply RTX Video Super Resolution while scaling.
+    // `hdrOutput`: write PQ / BT.2020 RGB (HDR10, no tone mapping) instead of SDR BT.709.
     bool Blit(ID3D11Texture2D* src, UINT srcSlice, const RECT& srcRect, const AVFrame* colorInfo,
-              ID3D11Texture2D* dst, const RECT& dstRect, bool nvidiaVsr);
+              ID3D11Texture2D* dst, const RECT& dstRect, bool nvidiaVsr, bool hdrOutput);
 
     // True if the last driver-VSR request was accepted by the driver (it can still be
     // disabled in the NVIDIA Control Panel, which the API cannot report).
@@ -27,7 +28,7 @@ public:
 
 private:
     bool EnsureProcessor(const D3D11_TEXTURE2D_DESC& in, const D3D11_TEXTURE2D_DESC& out);
-    void ApplyColorSpace(const AVFrame* colorInfo);
+    void ApplyColorSpace(const AVFrame* colorInfo, bool hdrOutput);
     void ApplyNvidiaVsr(bool enable);
 
     ComPtr<ID3D11Device> m_device;
@@ -38,6 +39,7 @@ private:
     ComPtr<ID3D11VideoProcessor> m_processor;
 
     UINT m_inW = 0, m_inH = 0, m_outW = 0, m_outH = 0;
+    DXGI_FORMAT m_inFmt = DXGI_FORMAT_UNKNOWN, m_outFmt = DXGI_FORMAT_UNKNOWN;
     bool m_nvVsrStateKnown = false;
     bool m_nvVsrEnabled = false;
     bool m_nvVsrAccepted = false;

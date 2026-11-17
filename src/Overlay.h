@@ -56,7 +56,13 @@ public:
     void ReleaseTarget();
     void OnDpiChanged();
 
-    void Draw(const OverlayState& state);
+    // HDR output: draw into an offscreen premultiplied RGBA8 texture that OutputPass blends
+    // in at SDR white, instead of directly into the (SDR) back buffer.
+    void SetOffscreen(bool offscreen);
+    ID3D11ShaderResourceView* OffscreenSrv() const { return m_offscreenSrv.Get(); }
+
+    // Returns true if anything was drawn this frame.
+    bool Draw(const OverlayState& state);
 
     // Hit testing in client-area pixels against the current layout.
     OverlayPart HitTest(int x, int y) const;
@@ -88,6 +94,9 @@ private:
     ComPtr<ID2D1Device> m_device;
     ComPtr<ID2D1DeviceContext> m_context;
     ComPtr<ID2D1Bitmap1> m_target;
+    bool m_offscreen = false;
+    ComPtr<ID3D11Texture2D> m_offscreenTex;
+    ComPtr<ID3D11ShaderResourceView> m_offscreenSrv;
     ComPtr<ID2D1SolidColorBrush> m_brush;
     ComPtr<ID2D1LinearGradientBrush> m_gradient;
 

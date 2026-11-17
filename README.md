@@ -20,7 +20,8 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | Play / pause / seek, frame pacing to vsync | done |
 | Audio (WASAPI, any codec/channel layout via libswresample), audio-master A/V sync, volume/mute | done |
 | On-screen controls (Direct2D/DirectWrite): seek bar, play/pause, volume, upscaler/quality, fullscreen, auto-hide, status messages | done |
-| HDR output, interlaced content, software-decode fallback | not yet |
+| HDR10 output on HDR displays (Windows HDR on): 10-bit PQ/BT.2020 end to end, VSR on HDR, HDR metadata, overlay at SDR white | done |
+| HDR -> SDR tone mapping in our own shader (today: driver video processor), 10-bit SDR precision, HLG, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
 
@@ -104,7 +105,11 @@ player logs the reason and stops rendering; restart it.
 - `src/VideoDecoder.*`: FFmpeg demux/decode with zero-copy D3D11 surfaces on the shared device
 - `src/VideoProcessor.*`: D3D11 Video Processor wrapper, color spaces, NVIDIA driver VSR extension
 - `src/Renderer.*`: picks the upscaling path, letterboxing, presentation
-- `src/Overlay.*`: control bar and on-screen messages drawn with Direct2D/DirectWrite onto the back buffer
+- `src/Overlay.*`: control bar and on-screen messages drawn with Direct2D/DirectWrite (onto the back buffer in SDR,
+  offscreen in HDR)
+- `src/OutputPass.*`: HDR10 output shader (compiled at startup with d3dcompiler_47): writes the PQ video to the
+  HDR10 swap chain and blends the overlay in at the Windows SDR-white level
+- `src/DisplayInfo.*`: monitor HDR state / peak / SDR white level, HDR10 metadata from the file
 - `src/upscalers/`: pluggable texture-to-texture upscalers (RTX Video SDK / NGX VSR backend)
 
 ## Licensing

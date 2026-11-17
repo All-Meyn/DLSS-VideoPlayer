@@ -16,9 +16,9 @@ public:
 
     virtual bool Init(ID3D11Device* device, ID3D11DeviceContext* context) = 0;
 
-    // Format and bind flags the backend needs on its input / output textures.
-    virtual DXGI_FORMAT InputFormat() const = 0;
-    virtual DXGI_FORMAT OutputFormat() const = 0;
+    // Texture formats the backend accepts (input and output use the same format), and the
+    // bind flags it needs on its input / output textures.
+    virtual bool SupportsFormat(DXGI_FORMAT format) const = 0;
     virtual UINT InputBindFlags() const = 0;
     virtual UINT OutputBindFlags() const = 0;
 

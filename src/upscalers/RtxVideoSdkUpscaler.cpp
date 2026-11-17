@@ -111,10 +111,13 @@ public:
         return true;
     }
 
-    // NGX lists RGBA8 as its 8-bit buffer format; the output must be UAV-capable
-    // (NVSDK_NGX_Result_FAIL_RWFlagMissing otherwise).
-    DXGI_FORMAT InputFormat() const override { return DXGI_FORMAT_R8G8B8A8_UNORM; }
-    DXGI_FORMAT OutputFormat() const override { return DXGI_FORMAT_R8G8B8A8_UNORM; }
+    // RTX Video SDK (D3D11) VSR formats: 8-bit RGBA/BGRA for SDR, RGB10A2 for 10-bit SDR or
+    // HDR10 (PQ). The output must be UAV-capable (NVSDK_NGX_Result_FAIL_RWFlagMissing otherwise).
+    bool SupportsFormat(DXGI_FORMAT format) const override
+    {
+        return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+               format == DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
     UINT InputBindFlags() const override { return D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE; }
     UINT OutputBindFlags() const override
     {

@@ -79,6 +79,8 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
     }
     m_initialized = true;
     m_overlay.Init(&m_gpu, m_hwnd); // optional: without it the player is keyboard-only
+    if (!m_outputPass.Init(&m_gpu))
+        LogF("HDR output unavailable (shader setup failed); HDR video will be shown as SDR");
     if (m_renderer.HasRtxVideoSdk())
         m_mode = UpscaleMode::RtxVideoSdk; // prefer the SDK when it initialized
 
@@ -163,7 +165,9 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         m_minimized = (wp == SIZE_MINIMIZED);
         if (m_initialized && !m_minimized)
         {
-            m_overlay.ReleaseTarget(); // it holds the back buffer, which ResizeBuffers needs freed
+            // Both hold views of the back buffer, which ResizeBuffers needs released.
+            m_overlay.ReleaseTarget();
+            m_outputPass.ReleaseTarget();
             if (m_gpu.Resize(LOWORD(lp), HIWORD(lp)))
                 m_renderer.OnResize();
             // Render immediately so live-resizing (modal size loop) stays responsive.
@@ -182,6 +186,11 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_ERASEBKGND:
         return 1;
+
+    case WM_EXITSIZEMOVE:   // window dragged (possibly to another monitor)
+    case WM_DISPLAYCHANGE:  // resolution / HDR toggled / monitor added or removed
+        UpdateOutputMode();
+        return 0;
 
     case WM_KEYDOWN:
         OnKeyDown(wp);
@@ -341,6 +350,7 @@ void App::OpenFile(const std::wstring& path)
         msg.append(error.begin(), error.end());
         MessageBoxW(m_hwnd, msg.c_str(), kAppName, MB_ICONERROR);
         m_dirty = true;
+        UpdateOutputMode();
         UpdateTitle(true);
         return;
     }
@@ -353,6 +363,7 @@ void App::OpenFile(const std::wstring& path)
     {
         MessageBoxW(m_hwnd, L"The file opened but no frames could be decoded on the GPU.", kAppName, MB_ICONERROR);
         CloseVideo();
+        UpdateOutputMode();
         UpdateTitle(true);
         return;
     }
@@ -362,6 +373,7 @@ void App::OpenFile(const std::wstring& path)
     m_hasVideo = true;
     m_paused = false;
     m_loggedMode = -1; // log the upscaler state again for the new file
+    UpdateOutputMode(); // HDR10 file on an HDR display -> HDR10 output
     m_hasAudio = m_audio.Open(path, m_current.pts, false, m_muted ? 0.0f : m_volume);
     AnchorClock(m_current.pts);
     m_dirty = true;
@@ -621,11 +633,56 @@ void App::ApplyVolume()
 
 void App::PresentFrame()
 {
-    m_renderer.CopyToBackBuffer();
-    if (m_overlay.IsAvailable())
-        m_overlay.Draw(BuildOverlayState());
+    if (m_hdrOutput)
+    {
+        // HDR10: the overlay is drawn offscreen and blended in by the output shader.
+        const bool overlayDrawn = m_overlay.IsAvailable() && m_overlay.Draw(BuildOverlayState());
+        m_outputPass.Run(m_renderer.PresentSrv(), overlayDrawn ? m_overlay.OffscreenSrv() : nullptr,
+                         m_display.sdrWhiteNits);
+    }
+    else
+    {
+        m_renderer.CopyToBackBuffer();
+        if (m_overlay.IsAvailable())
+            m_overlay.Draw(BuildOverlayState());
+    }
     m_gpu.Present();
     m_overlayDirty = false;
+}
+
+void App::UpdateOutputMode()
+{
+    if (!m_initialized || m_deviceLost)
+        return;
+    m_display = QueryDisplayInfo(m_hwnd);
+
+    bool hdrContent = false;
+    if (m_hasVideo && m_current)
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        m_current.Texture()->GetDesc(&desc);
+        hdrContent = IsHdr10Frame(m_current.frame.get(), desc.Format);
+    }
+    const bool want = hdrContent && m_display.hdr && m_outputPass.IsAvailable();
+    if (hdrContent)
+        LogF("HDR10 video; display %ls: Windows HDR %s, peak %.0f nits, SDR white %.0f nits",
+             m_display.deviceName.c_str(), m_display.hdr ? "on" : "off", m_display.maxNits, m_display.sdrWhiteNits);
+    if (want == m_hdrOutput)
+        return;
+
+    // Everything holding a view of the back buffer or the presentation texture lets go first.
+    m_overlay.ReleaseTarget();
+    m_outputPass.ReleaseTarget();
+    const DXGI_HDR_METADATA_HDR10 metadata = HdrMetadataFromFrame(want ? m_current.frame.get() : nullptr);
+    m_hdrOutput = m_gpu.SetHdrOutput(want, &metadata);
+    m_renderer.SetHdrOutput(m_hdrOutput);
+    m_overlay.SetOffscreen(m_hdrOutput);
+    if (m_hdrOutput)
+        LogF("Output: HDR10 (mastering %u nits, MaxCLL %u, MaxFALL %u)", metadata.MaxMasteringLuminance,
+             metadata.MaxContentLightLevel, metadata.MaxFrameAverageLightLevel);
+    else
+        LogF(want ? "Output: SDR (switching to HDR10 failed)" : "Output: SDR");
+    m_dirty = true;
 }
 
 bool App::BarWanted(double now) const
@@ -881,6 +938,7 @@ void App::ToggleFullscreen()
         m_fullscreen = false;
     }
     m_dirty = true;
+    UpdateOutputMode(); // the window may now be on a different monitor
 }
 
 void App::UpdateTitle(bool force)
@@ -918,9 +976,10 @@ void App::UpdateTitle(bool force)
             swprintf(audioText, ARRAYSIZE(audioText), L"Vol %d%%", static_cast<int>(std::lround(m_volume * 100.0f)));
 
         swprintf(title, ARRAYSIZE(title),
-                 L"%ls  |  %dx%d -> %ldx%ld  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls", m_fileName.c_str(),
-                 m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top, modeText, m_quality,
-                 audioText, pos, dur, m_paused ? L"  [Paused]" : L"", kAppName);
+                 L"%ls  |  %dx%d -> %ldx%ld%ls  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls",
+                 m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
+                 m_hdrOutput ? L"  HDR10" : L"", modeText, m_quality, audioText, pos, dur,
+                 m_paused ? L"  [Paused]" : L"", kAppName);
     }
     SetWindowTextW(m_hwnd, title);
 }

@@ -26,10 +26,19 @@ bool Renderer::Init(GpuDevice* gpu, bool enableRtxSdk)
     return EnsurePresentTexture();
 }
 
+void Renderer::SetHdrOutput(bool hdr)
+{
+    m_hdr = hdr;
+    m_sdkInput.Reset();
+    m_sdkOutput.Reset();
+    OnResize(); // recreates the presentation texture in the new format
+}
+
 void Renderer::OnResize()
 {
     m_present.Reset();
     m_presentRtv.Reset();
+    m_presentSrv.Reset();
     m_sdkOutput.Reset();
     EnsurePresentTexture();
 }
@@ -66,10 +75,11 @@ bool Renderer::EnsurePresentTexture()
 {
     if (m_present)
         return true;
-    if (!EnsureTexture(m_present, m_gpu->Width(), m_gpu->Height(), GpuDevice::kBackBufferFormat,
-                       D3D11_BIND_RENDER_TARGET))
+    if (!EnsureTexture(m_present, m_gpu->Width(), m_gpu->Height(), PresentFormat(),
+                       D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE))
         return false;
     m_gpu->Device()->CreateRenderTargetView(m_present.Get(), nullptr, &m_presentRtv);
+    m_gpu->Device()->CreateShaderResourceView(m_present.Get(), nullptr, &m_presentSrv);
     RenderBlack();
     return true;
 }
@@ -113,13 +123,14 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
 
     if (mode == UpscaleMode::RtxVideoSdk)
     {
-        if (m_sdk && m_sdk->OutputFormat() == GpuDevice::kBackBufferFormat &&
-            EnsureTexture(m_sdkInput, f->width, f->height, m_sdk->InputFormat(), m_sdk->InputBindFlags()) &&
-            EnsureTexture(m_sdkOutput, destW, destH, m_sdk->OutputFormat(), m_sdk->OutputBindFlags()))
+        const DXGI_FORMAT format = PresentFormat(); // SDK textures match it, so the result copies straight in
+        if (m_sdk && m_sdk->SupportsFormat(format) &&
+            EnsureTexture(m_sdkInput, f->width, f->height, format, m_sdk->InputBindFlags()) &&
+            EnsureTexture(m_sdkOutput, destW, destH, format, m_sdk->OutputBindFlags()))
         {
             // 1) YUV -> RGB at source resolution, 2) SDK upscale, 3) place into letterboxed frame.
             const RECT outRect{0, 0, destW, destH};
-            if (m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdkInput.Get(), srcRect, false) &&
+            if (m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdkInput.Get(), srcRect, false, m_hdr) &&
                 m_sdk->Upscale(m_sdkInput.Get(), srcRect, m_sdkOutput.Get(), outRect, quality))
             {
                 RenderBlack();
@@ -136,7 +147,7 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
     }
 
     const bool vsr = mode == UpscaleMode::DriverVsr;
-    if (!m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, vsr))
+    if (!m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, vsr, m_hdr))
         return false;
     effectiveMode = (vsr && m_vp.NvidiaVsrAccepted()) ? UpscaleMode::DriverVsr : UpscaleMode::Off;
     return true;

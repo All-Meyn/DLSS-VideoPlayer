@@ -1,7 +1,7 @@
 #pragma once
 
 #include <d3d11_1.h>
-#include <dxgi1_2.h>
+#include <dxgi1_5.h>
 #include <wrl/client.h>
 
 #include <string>
@@ -16,6 +16,12 @@ public:
     // debugLayer: enable the D3D11 debug layer (needs the Windows "Graphics Tools" optional feature).
     bool Init(HWND hwnd, bool debugLayer);
     bool Resize(UINT width, UINT height);
+
+    // Switches the swap chain between SDR (8-bit, sRGB-like) and HDR10 (10-bit PQ BT.2020)
+    // output. Callers must release every view of the back buffer first. Returns false (and
+    // stays/returns to SDR) if the display path doesn't accept HDR10.
+    bool SetHdrOutput(bool enable, const DXGI_HDR_METADATA_HDR10* metadata);
+    bool IsHdrOutput() const { return m_hdr; }
     void Present();
 
     ID3D11Device* Device() const { return m_device.Get(); }
@@ -36,8 +42,10 @@ public:
     bool CheckDeviceRemoved();
     const std::wstring& AdapterName() const { return m_adapterName; }
 
-    // RGBA (not BGRA) so the RTX Video SDK's RGBA8 output can be copied straight in.
+    // SDR back buffer: RGBA (not BGRA) so the RTX Video SDK's RGBA8 output can be copied
+    // straight in. HDR10 back buffer: 10-bit, written by OutputPass.
     static constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    static constexpr DXGI_FORMAT kHdrBackBufferFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
 
 private:
     ComPtr<ID3D11Device> m_device;
@@ -45,6 +53,7 @@ private:
     ComPtr<ID3D11VideoDevice> m_videoDevice;
     ComPtr<ID3D11VideoContext> m_videoContext;
     ComPtr<IDXGISwapChain1> m_swapChain;
+    bool m_hdr = false;
     ComPtr<ID3D11Texture2D> m_backBuffer;
 
     UINT m_width = 0;

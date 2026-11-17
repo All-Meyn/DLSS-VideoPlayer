@@ -104,6 +104,14 @@ void Overlay::ReleaseTarget()
     if (m_context)
         m_context->SetTarget(nullptr);
     m_target.Reset();
+    m_offscreenSrv.Reset(); // window-sized: recreated after a resize
+    m_offscreenTex.Reset();
+}
+
+void Overlay::SetOffscreen(bool offscreen)
+{
+    ReleaseTarget();
+    m_offscreen = offscreen;
 }
 
 void Overlay::OnDpiChanged()
@@ -117,16 +125,39 @@ bool Overlay::EnsureTarget()
 {
     if (m_target)
         return true;
-    ID3D11Texture2D* backBuffer = m_gpu->BackBuffer();
-    if (!backBuffer)
+    ID3D11Texture2D* targetTexture = m_gpu->BackBuffer();
+    if (m_offscreen)
+    {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = m_gpu->Width();
+        td.Height = m_gpu->Height();
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(m_gpu->Device()->CreateTexture2D(&td, nullptr, &m_offscreenTex)) ||
+            FAILED(m_gpu->Device()->CreateShaderResourceView(m_offscreenTex.Get(), nullptr, &m_offscreenSrv)))
+        {
+            LogF("Overlay: creating the offscreen texture failed");
+            m_offscreenTex.Reset();
+            return false;
+        }
+        targetTexture = m_offscreenTex.Get();
+    }
+    if (!targetTexture)
         return false;
     ComPtr<IDXGISurface> surface;
-    if (FAILED(backBuffer->QueryInterface(IID_PPV_ARGS(&surface))))
+    if (FAILED(targetTexture->QueryInterface(IID_PPV_ARGS(&surface))))
         return false;
 
+    // Back buffer: opaque SDR. Offscreen: premultiplied alpha for blending in OutputPass.
     const D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
         static_cast<D2D1_BITMAP_OPTIONS>(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
-        D2D1::PixelFormat(GpuDevice::kBackBufferFormat, D2D1_ALPHA_MODE_IGNORE), m_dpi, m_dpi);
+        m_offscreen ? D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+                    : D2D1::PixelFormat(GpuDevice::kBackBufferFormat, D2D1_ALPHA_MODE_IGNORE),
+        m_dpi, m_dpi);
     const HRESULT hr = m_context->CreateBitmapFromDxgiSurface(surface.Get(), &props, &m_target);
     if (FAILED(hr))
     {
@@ -182,18 +213,20 @@ void Overlay::Text(const wchar_t* text, IDWriteTextFormat* format, const D2D1_RE
     m_context->DrawText(text, static_cast<UINT32>(wcslen(text)), format, r, m_brush.Get());
 }
 
-void Overlay::Draw(const OverlayState& s)
+bool Overlay::Draw(const OverlayState& s)
 {
     m_lastHasAudio = s.hasAudio;
     m_lastShowQuality = s.showQuality;
     if (!m_context || (s.barOpacity <= 0.001f && (!s.osdText || s.osdOpacity <= 0.001f)))
-        return;
+        return false;
     if (!EnsureTarget())
-        return;
+        return false;
 
     const Layout l = ComputeLayout();
     m_context->BeginDraw();
     m_context->SetTransform(D2D1::Matrix3x2F::Identity());
+    if (m_offscreen)
+        m_context->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
     if (s.barOpacity > 0.001f)
     {
@@ -297,7 +330,11 @@ void Overlay::Draw(const OverlayState& s)
     m_opacity = 1.0f;
     const HRESULT hr = m_context->EndDraw();
     if (hr == static_cast<HRESULT>(D2DERR_RECREATE_TARGET))
+    {
         ReleaseTarget(); // device loss is reported by GpuDevice::CheckDeviceRemoved
+        return false;
+    }
+    return SUCCEEDED(hr);
 }
 
 OverlayPart Overlay::HitTest(int x, int y) const
