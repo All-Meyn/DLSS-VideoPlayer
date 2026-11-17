@@ -28,8 +28,9 @@ public:
 
     bool HasRtxVideoSdk() const { return m_sdk != nullptr; }
 
-    // HDR10 output: the presentation texture becomes 10-bit PQ / BT.2020 (read by OutputPass).
-    void SetHdrOutput(bool hdr);
+    // 10-bit modes: the presentation texture becomes RGB10A2 (read by OutputPass); in HDR10
+    // it holds PQ / BT.2020, otherwise SDR BT.709.
+    void SetOutputMode(OutputMode mode);
     ID3D11ShaderResourceView* PresentSrv() const { return m_presentSrv.Get(); }
 
     // Processes `frame` with the selected mode into the presentation texture.
@@ -55,8 +56,12 @@ private:
     ComPtr<ID3D11Texture2D> m_present;      // window-sized, back-buffer format
     ComPtr<ID3D11RenderTargetView> m_presentRtv;
     ComPtr<ID3D11ShaderResourceView> m_presentSrv;
-    bool m_hdr = false;
-    DXGI_FORMAT PresentFormat() const { return m_hdr ? GpuDevice::kHdrBackBufferFormat : GpuDevice::kBackBufferFormat; }
+    OutputMode m_mode = OutputMode::Sdr8;
+    bool IsHdr() const { return m_mode == OutputMode::Hdr10; }
+    DXGI_FORMAT PresentFormat() const
+    {
+        return m_mode == OutputMode::Sdr8 ? GpuDevice::kBackBufferFormat : GpuDevice::k10BitBackBufferFormat;
+    }
     ComPtr<ID3D11Texture2D> m_sdkInput;     // source-sized RGB (SDK path)
     ComPtr<ID3D11Texture2D> m_sdkOutput;    // dest-rect-sized RGB (SDK path)
     RECT m_destRect{};

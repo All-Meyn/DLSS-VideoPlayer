@@ -10,14 +10,15 @@ namespace
 {
 // Full-screen triangle (no vertex buffer) + PQ-domain overlay compositing.
 constexpr char kShaderSource[] = R"hlsl(
-Texture2D<float4> VideoTex : register(t0);   // PQ-encoded BT.2020 (HDR10)
+Texture2D<float4> VideoTex : register(t0);   // PQ-encoded BT.2020 (HDR10) or SDR BT.709
 Texture2D<float4> UiTex    : register(t1);   // premultiplied alpha, sRGB-like gamma, BT.709
 
 cbuffer Constants : register(b0)
 {
     float SdrWhiteNits;
     uint  UseOverlay;
-    float2 Padding;
+    uint  Hdr;
+    float Padding;
 };
 
 float4 VSMain(uint id : SV_VertexID) : SV_Position
@@ -61,9 +62,16 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target
         float4 ui = UiTex.Load(p);
         if (ui.a > 0.0)
         {
-            float3 uiLinear = mul(Bt709To2020, pow(ui.rgb / ui.a, 2.2)) * (SdrWhiteNits / 10000.0);
-            float3 videoLinear = PqToLinear(video);
-            video = LinearToPq(uiLinear * ui.a + videoLinear * (1.0 - ui.a));
+            if (Hdr != 0)
+            {
+                float3 uiLinear = mul(Bt709To2020, pow(ui.rgb / ui.a, 2.2)) * (SdrWhiteNits / 10000.0);
+                float3 videoLinear = PqToLinear(video);
+                video = LinearToPq(uiLinear * ui.a + videoLinear * (1.0 - ui.a));
+            }
+            else
+            {
+                video = ui.rgb + video * (1.0 - ui.a); // premultiplied "over", same as D2D in 8-bit
+            }
         }
     }
     return float4(video, 1.0);
@@ -74,7 +82,8 @@ struct Constants
 {
     float sdrWhiteNits;
     UINT useOverlay;
-    float padding[2];
+    UINT hdr;
+    float padding;
 };
 
 ComPtr<ID3DBlob> Compile(const char* entry, const char* target)
@@ -122,7 +131,8 @@ void OutputPass::ReleaseTarget()
     m_rtv.Reset();
 }
 
-void OutputPass::Run(ID3D11ShaderResourceView* video, ID3D11ShaderResourceView* overlay, float sdrWhiteNits)
+void OutputPass::Run(ID3D11ShaderResourceView* video, ID3D11ShaderResourceView* overlay, float sdrWhiteNits,
+                     bool hdr)
 {
     if (!m_ps || !video || !m_gpu->BackBuffer())
         return;
@@ -133,7 +143,7 @@ void OutputPass::Run(ID3D11ShaderResourceView* video, ID3D11ShaderResourceView* 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(ctx->Map(m_constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
-        const Constants c{sdrWhiteNits, overlay ? 1u : 0u, {0.0f, 0.0f}};
+        const Constants c{sdrWhiteNits, overlay ? 1u : 0u, hdr ? 1u : 0u, 0.0f};
         memcpy(mapped.pData, &c, sizeof(c));
         ctx->Unmap(m_constants.Get(), 0);
     }

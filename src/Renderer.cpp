@@ -26,9 +26,9 @@ bool Renderer::Init(GpuDevice* gpu, bool enableRtxSdk)
     return EnsurePresentTexture();
 }
 
-void Renderer::SetHdrOutput(bool hdr)
+void Renderer::SetOutputMode(OutputMode mode)
 {
-    m_hdr = hdr;
+    m_mode = mode;
     m_sdkInput.Reset();
     m_sdkOutput.Reset();
     OnResize(); // recreates the presentation texture in the new format
@@ -130,7 +130,7 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
         {
             // 1) YUV -> RGB at source resolution, 2) SDK upscale, 3) place into letterboxed frame.
             const RECT outRect{0, 0, destW, destH};
-            if (m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdkInput.Get(), srcRect, false, m_hdr) &&
+            if (m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdkInput.Get(), srcRect, false, IsHdr()) &&
                 m_sdk->Upscale(m_sdkInput.Get(), srcRect, m_sdkOutput.Get(), outRect, quality))
             {
                 RenderBlack();
@@ -147,7 +147,7 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
     }
 
     const bool vsr = mode == UpscaleMode::DriverVsr;
-    if (!m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, vsr, m_hdr))
+    if (!m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, vsr, IsHdr()))
         return false;
     effectiveMode = (vsr && m_vp.NvidiaVsrAccepted()) ? UpscaleMode::DriverVsr : UpscaleMode::Off;
     return true;

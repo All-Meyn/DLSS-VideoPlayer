@@ -85,7 +85,7 @@ private:
     bool m_initialized = false;
     bool m_deviceLost = false; // GPU device removed: rendering stops until restart
     DisplayInfo m_display;
-    bool m_hdrOutput = false; // swap chain is HDR10 (PQ / BT.2020)
+    OutputMode m_outputMode = OutputMode::Sdr8;
 
     // Playback state
     VideoFrame m_current;

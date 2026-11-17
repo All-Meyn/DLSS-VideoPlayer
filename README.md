@@ -21,7 +21,8 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | Audio (WASAPI, any codec/channel layout via libswresample), audio-master A/V sync, volume/mute | done |
 | On-screen controls (Direct2D/DirectWrite): seek bar, play/pause, volume, upscaler/quality, fullscreen, auto-hide, status messages | done |
 | HDR10 output on HDR displays (Windows HDR on): 10-bit PQ/BT.2020 end to end, VSR on HDR, HDR metadata, overlay at SDR white | done |
-| HDR -> SDR tone mapping in our own shader (today: driver video processor), 10-bit SDR precision, HLG, interlaced content, software-decode fallback | not yet |
+| 10-bit SDR precision: 10-bit sources stay 10-bit through VSR and output (10-bit SDR swap chain) | done |
+| HDR -> SDR tone mapping in our own shader (today: driver video processor), HLG, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
 

@@ -8,6 +8,16 @@
 
 using Microsoft::WRL::ComPtr;
 
+// Swap chain output: 8-bit SDR (default), 10-bit SDR (10-bit sources, less banding) or
+// HDR10 (PQ / BT.2020 for HDR10 sources on a display with Windows HDR on).
+enum class OutputMode
+{
+    Sdr8,
+    Sdr10,
+    Hdr10,
+};
+const char* OutputModeName(OutputMode mode);
+
 // Owns the D3D11 device, the video device/context interfaces and the swap chain.
 // Prefers an NVIDIA adapter so RTX Video Super Resolution is available.
 class GpuDevice
@@ -17,11 +27,11 @@ public:
     bool Init(HWND hwnd, bool debugLayer);
     bool Resize(UINT width, UINT height);
 
-    // Switches the swap chain between SDR (8-bit, sRGB-like) and HDR10 (10-bit PQ BT.2020)
-    // output. Callers must release every view of the back buffer first. Returns false (and
-    // stays/returns to SDR) if the display path doesn't accept HDR10.
-    bool SetHdrOutput(bool enable, const DXGI_HDR_METADATA_HDR10* metadata);
-    bool IsHdrOutput() const { return m_hdr; }
+    // Switches the swap chain format / color space. Callers must release every view of the
+    // back buffer first. Returns the mode actually set (falls back HDR10 -> SDR 10-bit ->
+    // SDR 8-bit if the display path refuses).
+    OutputMode SetOutputMode(OutputMode mode, const DXGI_HDR_METADATA_HDR10* metadata);
+    OutputMode GetOutputMode() const { return m_mode; }
     void Present();
 
     ID3D11Device* Device() const { return m_device.Get(); }
@@ -42,10 +52,10 @@ public:
     bool CheckDeviceRemoved();
     const std::wstring& AdapterName() const { return m_adapterName; }
 
-    // SDR back buffer: RGBA (not BGRA) so the RTX Video SDK's RGBA8 output can be copied
-    // straight in. HDR10 back buffer: 10-bit, written by OutputPass.
+    // 8-bit SDR back buffer: RGBA (not BGRA) so the RTX Video SDK's RGBA8 output can be
+    // copied straight in. 10-bit (SDR or HDR10) back buffer: written by OutputPass.
     static constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-    static constexpr DXGI_FORMAT kHdrBackBufferFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+    static constexpr DXGI_FORMAT k10BitBackBufferFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
 
 private:
     ComPtr<ID3D11Device> m_device;
@@ -53,7 +63,7 @@ private:
     ComPtr<ID3D11VideoDevice> m_videoDevice;
     ComPtr<ID3D11VideoContext> m_videoContext;
     ComPtr<IDXGISwapChain1> m_swapChain;
-    bool m_hdr = false;
+    OutputMode m_mode = OutputMode::Sdr8;
     ComPtr<ID3D11Texture2D> m_backBuffer;
 
     UINT m_width = 0;

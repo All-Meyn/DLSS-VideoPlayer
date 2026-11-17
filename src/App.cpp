@@ -633,12 +633,12 @@ void App::ApplyVolume()
 
 void App::PresentFrame()
 {
-    if (m_hdrOutput)
+    if (m_outputMode != OutputMode::Sdr8)
     {
-        // HDR10: the overlay is drawn offscreen and blended in by the output shader.
+        // 10-bit / HDR10: the overlay is drawn offscreen and blended in by the output shader.
         const bool overlayDrawn = m_overlay.IsAvailable() && m_overlay.Draw(BuildOverlayState());
         m_outputPass.Run(m_renderer.PresentSrv(), overlayDrawn ? m_overlay.OffscreenSrv() : nullptr,
-                         m_display.sdrWhiteNits);
+                         m_display.sdrWhiteNits, m_outputMode == OutputMode::Hdr10);
     }
     else
     {
@@ -657,31 +657,43 @@ void App::UpdateOutputMode()
     m_display = QueryDisplayInfo(m_hwnd);
 
     bool hdrContent = false;
+    bool tenBit = false;
     if (m_hasVideo && m_current)
     {
         D3D11_TEXTURE2D_DESC desc{};
         m_current.Texture()->GetDesc(&desc);
+        tenBit = desc.Format == DXGI_FORMAT_P010;
         hdrContent = IsHdr10Frame(m_current.frame.get(), desc.Format);
     }
-    const bool want = hdrContent && m_display.hdr && m_outputPass.IsAvailable();
+    OutputMode want = OutputMode::Sdr8;
+    if (m_outputPass.IsAvailable())
+    {
+        if (hdrContent && m_display.hdr)
+            want = OutputMode::Hdr10;
+        else if (tenBit)
+            want = OutputMode::Sdr10; // keeps 10-bit sources (and tone-mapped HDR) at 10 bits
+    }
     if (hdrContent)
         LogF("HDR10 video; display %ls: Windows HDR %s, peak %.0f nits, SDR white %.0f nits",
              m_display.deviceName.c_str(), m_display.hdr ? "on" : "off", m_display.maxNits, m_display.sdrWhiteNits);
-    if (want == m_hdrOutput)
+    if (want == m_outputMode)
         return;
 
     // Everything holding a view of the back buffer or the presentation texture lets go first.
     m_overlay.ReleaseTarget();
     m_outputPass.ReleaseTarget();
-    const DXGI_HDR_METADATA_HDR10 metadata = HdrMetadataFromFrame(want ? m_current.frame.get() : nullptr);
-    m_hdrOutput = m_gpu.SetHdrOutput(want, &metadata);
-    m_renderer.SetHdrOutput(m_hdrOutput);
-    m_overlay.SetOffscreen(m_hdrOutput);
-    if (m_hdrOutput)
+    const DXGI_HDR_METADATA_HDR10 metadata =
+        HdrMetadataFromFrame(want == OutputMode::Hdr10 ? m_current.frame.get() : nullptr);
+    m_outputMode = m_gpu.SetOutputMode(want, &metadata);
+    m_renderer.SetOutputMode(m_outputMode);
+    m_overlay.SetOffscreen(m_outputMode != OutputMode::Sdr8);
+    if (m_outputMode == OutputMode::Hdr10)
         LogF("Output: HDR10 (mastering %u nits, MaxCLL %u, MaxFALL %u)", metadata.MaxMasteringLuminance,
              metadata.MaxContentLightLevel, metadata.MaxFrameAverageLightLevel);
+    else if (m_outputMode == want)
+        LogF("Output: %s", OutputModeName(m_outputMode));
     else
-        LogF(want ? "Output: SDR (switching to HDR10 failed)" : "Output: SDR");
+        LogF("Output: %s (requested %s)", OutputModeName(m_outputMode), OutputModeName(want));
     m_dirty = true;
 }
 
@@ -978,7 +990,10 @@ void App::UpdateTitle(bool force)
         swprintf(title, ARRAYSIZE(title),
                  L"%ls  |  %dx%d -> %ldx%ld%ls  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls",
                  m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
-                 m_hdrOutput ? L"  HDR10" : L"", modeText, m_quality, audioText, pos, dur,
+                 m_outputMode == OutputMode::Hdr10   ? L"  HDR10"
+                 : m_outputMode == OutputMode::Sdr10 ? L"  10-bit"
+                                                     : L"",
+                 modeText, m_quality, audioText, pos, dur,
                  m_paused ? L"  [Paused]" : L"", kAppName);
     }
     SetWindowTextW(m_hwnd, title);

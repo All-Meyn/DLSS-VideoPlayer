@@ -151,31 +151,39 @@ bool GpuDevice::Resize(UINT width, UINT height)
     return true;
 }
 
-bool GpuDevice::SetHdrOutput(bool enable, const DXGI_HDR_METADATA_HDR10* metadata)
+const char* OutputModeName(OutputMode mode)
+{
+    switch (mode)
+    {
+    case OutputMode::Sdr8: return "SDR 8-bit";
+    case OutputMode::Sdr10: return "SDR 10-bit";
+    case OutputMode::Hdr10: return "HDR10";
+    }
+    return "?";
+}
+
+OutputMode GpuDevice::SetOutputMode(OutputMode mode, const DXGI_HDR_METADATA_HDR10* metadata)
 {
     ComPtr<IDXGISwapChain4> sc4;
-    if (FAILED(m_swapChain.As(&sc4)))
-        enable = false; // pre-Windows 10 1709 DXGI: no HDR
+    m_swapChain.As(&sc4); // null before Windows 10 1709: no color-space control
+    if (!sc4 && mode == OutputMode::Hdr10)
+        mode = OutputMode::Sdr10;
 
-    const DXGI_FORMAT format = enable ? kHdrBackBufferFormat : kBackBufferFormat;
+    const DXGI_FORMAT format = mode == OutputMode::Sdr8 ? kBackBufferFormat : k10BitBackBufferFormat;
     const DXGI_COLOR_SPACE_TYPE colorSpace =
-        enable ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        mode == OutputMode::Hdr10 ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 
     m_backBuffer.Reset();
     m_context->ClearState();
     m_context->Flush();
-    HRESULT hr = m_swapChain->ResizeBuffers(0, m_width, m_height, format, 0);
+    const HRESULT hr = m_swapChain->ResizeBuffers(0, m_width, m_height, format, 0);
     if (FAILED(hr))
     {
-        LogF("SetHdrOutput: ResizeBuffers failed: 0x%08lx", static_cast<unsigned long>(hr));
-        if (enable)
-        {
-            // Get back to a working SDR swap chain.
-            m_swapChain->ResizeBuffers(0, m_width, m_height, kBackBufferFormat, 0);
-            m_swapChain->GetBuffer(0, IID_PPV_ARGS(&m_backBuffer));
-            m_hdr = false;
-        }
-        return false;
+        LogF("SetOutputMode(%s): ResizeBuffers failed: 0x%08lx", OutputModeName(mode), static_cast<unsigned long>(hr));
+        if (mode != OutputMode::Sdr8)
+            return SetOutputMode(OutputMode::Sdr8, nullptr);
+        m_mode = OutputMode::Sdr8;
+        return m_mode;
     }
     m_swapChain->GetBuffer(0, IID_PPV_ARGS(&m_backBuffer));
 
@@ -187,19 +195,19 @@ bool GpuDevice::SetHdrOutput(bool enable, const DXGI_HDR_METADATA_HDR10* metadat
         {
             sc4->SetColorSpace1(colorSpace);
         }
-        else if (enable)
+        else if (mode == OutputMode::Hdr10)
         {
-            LogF("SetHdrOutput: display path does not accept HDR10; staying SDR");
-            return SetHdrOutput(false, nullptr);
+            LogF("SetOutputMode: display path does not accept HDR10; using SDR 10-bit");
+            return SetOutputMode(OutputMode::Sdr10, nullptr);
         }
-        if (enable && metadata)
+        if (mode == OutputMode::Hdr10 && metadata)
             sc4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(*metadata),
                                 const_cast<DXGI_HDR_METADATA_HDR10*>(metadata));
         else
             sc4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
     }
-    m_hdr = enable;
-    return enable;
+    m_mode = mode;
+    return mode;
 }
 
 void GpuDevice::Present()
