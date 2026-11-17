@@ -150,9 +150,8 @@ void Renderer::RenderBlack()
     m_gpu->Context()->ClearRenderTargetView(m_presentRtv.Get(), black);
 }
 
-void Renderer::Present()
+void Renderer::CopyToBackBuffer()
 {
     if (m_present && m_gpu->BackBuffer())
         m_gpu->Context()->CopyResource(m_gpu->BackBuffer(), m_present.Get());
-    m_gpu->Present();
 }

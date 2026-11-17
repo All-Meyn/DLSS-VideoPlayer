@@ -2,6 +2,7 @@
 
 #include "AudioPlayer.h"
 #include "GpuDevice.h"
+#include "Overlay.h"
 #include "Renderer.h"
 #include "VideoDecoder.h"
 
@@ -39,7 +40,23 @@ private:
     void CycleUpscaleMode();
     void ToggleFullscreen();
     void ChangeVolume(float delta);
+    void SetVolume(float volume);
+    void ToggleMute();
     void ApplyVolume();
+    void SetQuality(int quality);
+
+    // On-screen controls
+    void OnMouseMove(int x, int y);
+    void OnMouseDown(int x, int y);
+    void OnMouseUp();
+    void UpdateOverlay();             // fade / auto-hide / cursor, once per loop iteration
+    bool BarWanted(double now) const; // should the control bar be visible?
+    bool OverlayAnimating() const;    // needs redraws even when paused
+    float OsdOpacity(double now) const;
+    OverlayState BuildOverlayState();
+    void ShowOsd(const wchar_t* format, ...);
+    void ShowSeekOsd();
+    void PresentFrame(); // back buffer <- video frame, overlay on top, Present
 
     bool AdvancePlayback(); // returns true if the displayed frame changed
     void DecodeNext();
@@ -56,6 +73,7 @@ private:
     HWND m_hwnd = nullptr;
     GpuDevice m_gpu;
     Renderer m_renderer;
+    Overlay m_overlay;
     VideoDecoder m_decoder;
     AudioPlayer m_audio;
     bool m_initialized = false;
@@ -93,4 +111,21 @@ private:
     bool m_fullscreen = false;
     WINDOWPLACEMENT m_windowedPlacement{sizeof(WINDOWPLACEMENT)};
     double m_lastTitleUpdate = 0.0;
+
+    // On-screen controls state
+    bool m_overlayDirty = false; // overlay changed: present even if the video frame didn't
+    float m_barOpacity = 0.0f;
+    double m_lastOverlayUpdate = 0.0;
+    double m_lastMouseMove = -1e9;
+    int m_mouseX = -1;
+    int m_mouseY = -1;
+    bool m_mouseInside = false;
+    bool m_trackingMouse = false;
+    bool m_cursorHidden = false;
+    OverlayPart m_hover = OverlayPart::None;
+    bool m_draggingSeek = false;
+    bool m_draggingVolume = false;
+    double m_seekPreview = -1.0;
+    wchar_t m_osdText[96] = {};
+    double m_osdUntil = 0.0;
 };

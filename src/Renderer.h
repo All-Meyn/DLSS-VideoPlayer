@@ -17,7 +17,7 @@ enum class UpscaleMode
 const char* UpscaleModeName(UpscaleMode mode);
 
 // Turns decoded frames into a window-sized "presentation" texture, which is then
-// copied to the swap chain every vsync. Re-processing only happens when the frame,
+// copied to the swap chain every vsync (App draws the overlay on top and presents). Re-processing only happens when the frame,
 // window size or settings change.
 class Renderer
 {
@@ -33,7 +33,9 @@ public:
     bool RenderFrame(const VideoFrame& frame, AVRational sar, UpscaleMode mode, int quality,
                      UpscaleMode& effectiveMode);
     void RenderBlack();
-    void Present();
+    // Copies the processed frame into the swap chain back buffer (overlay is drawn after,
+    // then GpuDevice::Present).
+    void CopyToBackBuffer();
 
     RECT LastDestRect() const { return m_destRect; }
 

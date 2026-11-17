@@ -19,6 +19,7 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | **RTX Video SDK backend** (NGX VSR feature, quality levels 1-4) | done, used by default when it initializes |
 | Play / pause / seek, frame pacing to vsync | done |
 | Audio (WASAPI, any codec/channel layout via libswresample), audio-master A/V sync, volume/mute | done |
+| On-screen controls (Direct2D/DirectWrite): seek bar, play/pause, volume, upscaler/quality, fullscreen, auto-hide, status messages | done |
 | HDR output, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
@@ -68,6 +69,7 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 | `F`, `Alt+Enter`, double-click | Toggle fullscreen (`Esc` leaves) |
 | `Up` / `Down` | Volume +/- 5% |
 | `M` | Mute / unmute |
+| Mouse | Move to show the control bar (hides after 2.5 s; cursor hides too in fullscreen). Click/drag the seek bar (hover shows the time), drag the volume slider, click the buttons. Wheel = volume. Double-click the video = fullscreen. |
 
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.
 Super resolution only runs when the video is being **enlarged**: e.g. a 1080p video in a 1080p window
@@ -102,6 +104,7 @@ player logs the reason and stops rendering; restart it.
 - `src/VideoDecoder.*`: FFmpeg demux/decode with zero-copy D3D11 surfaces on the shared device
 - `src/VideoProcessor.*`: D3D11 Video Processor wrapper, color spaces, NVIDIA driver VSR extension
 - `src/Renderer.*`: picks the upscaling path, letterboxing, presentation
+- `src/Overlay.*`: control bar and on-screen messages drawn with Direct2D/DirectWrite onto the back buffer
 - `src/upscalers/`: pluggable texture-to-texture upscalers (RTX Video SDK / NGX VSR backend)
 
 ## Licensing
