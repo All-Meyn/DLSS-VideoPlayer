@@ -27,7 +27,8 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 - NVIDIA GeForce RTX 20-series or newer, recent Game Ready / Studio driver
 - NVIDIA Control Panel -> *Adjust video image settings* -> **RTX video enhancement -> Super resolution** enabled
   (required for the driver VSR path)
-- Visual Studio 2022 (Desktop development with C++) and CMake 3.21+
+- Visual Studio 2022 or 2026, or just the free Build Tools, with the "Desktop development with C++" workload; CMake 3.21+
+  (CMake 4.2+ for the Visual Studio 2026 generator)
 - FFmpeg **shared** build for Windows (headers + import libs + DLLs), FFmpeg 6.x or 7.x,
   e.g. from https://github.com/BtbN/FFmpeg-Builds/releases (`ffmpeg-n7.1-latest-win64-lgpl-shared-7.1.zip`)
   or https://www.gyan.dev/ffmpeg/builds/ (`ffmpeg-release-full-shared`)
@@ -36,7 +37,8 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 ## Build
 
 ```bat
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg-7.1-shared
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg
+REM Visual Studio / Build Tools 2022: use -G "Visual Studio 17 2022" instead
 cmake --build build --config Release
 build\Release\DLSSVideoPlayer.exe path\to\video.mkv
 ```
@@ -44,8 +46,8 @@ build\Release\DLSSVideoPlayer.exe path\to\video.mkv
 With the RTX Video SDK (v1.1):
 
 ```bat
-cmake -S . -B build -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg-7.1-shared ^
-      -DDLSSVP_WITH_RTX_VIDEO_SDK=ON -DRTX_VIDEO_SDK_DIR=C:/Users/<you>/Downloads/RTX_Video_SDK_v1.1.0
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg -DDLSSVP_WITH_RTX_VIDEO_SDK=ON
+REM The SDK is expected at C:/libs/RTXVSR (the extracted SDK folder); override with -DRTX_VIDEO_SDK_DIR=<path>
 ```
 
 The FFmpeg DLLs are copied next to the executable after each build. With the SDK enabled, CMake also

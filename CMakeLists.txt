@@ -18,7 +18,7 @@ set(FFMPEG_DIR "" CACHE PATH "Root of a Windows FFmpeg shared build (include/, l
 
 # NVIDIA RTX Video SDK (optional). Download from developer.nvidia.com/rtx-video-sdk.
 option(DLSSVP_WITH_RTX_VIDEO_SDK "Build the NVIDIA RTX Video SDK upscaler backend" OFF)
-set(RTX_VIDEO_SDK_DIR "" CACHE PATH "Root of the extracted NVIDIA RTX Video SDK")
+set(RTX_VIDEO_SDK_DIR "C:/libs/RTXVSR" CACHE PATH "Root of the extracted NVIDIA RTX Video SDK")
 
 # ---------------------------------------------------------------------------
 # FFmpeg
