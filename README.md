@@ -65,6 +65,11 @@ finds the NGX headers (`nvsdk_ngx_helpers_vsr.h`), links `nvsdk_ngx_d.lib`, and 
 SDK names the library differently, pass `-DRTX_VIDEO_SDK_LIB=<path to .lib>`.
 NGX writes its logs to `%TEMP%\VSRPlayer`.
 
+### Running from VS Code
+
+`.vscode/launch.json` has three F5 configurations (needs the C/C++ extension): plain, "open a file"
+(asks for a path) and "D3D11 debug layer". Log lines appear in the Debug Console.
+
 ## Controls
 
 | Key | Action |

@@ -1,0 +1,41 @@
+{
+  // F5 in VS Code (needs the C/C++ extension; build first with: cmake --build build --config Release).
+  // Log lines ([VSRPlayer] ...) appear in the Debug Console.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "VSRPlayer (Release)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/VSRPlayer.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/build/Release",
+      "console": "internalConsole"
+    },
+    {
+      "name": "VSRPlayer (Release) - open a file",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/VSRPlayer.exe",
+      "args": ["${input:videoFile}"],
+      "cwd": "${workspaceFolder}/build/Release",
+      "console": "internalConsole"
+    },
+    {
+      "name": "VSRPlayer (Release) - D3D11 debug layer",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/VSRPlayer.exe",
+      "args": ["--d3d-debug"],
+      "cwd": "${workspaceFolder}/build/Release",
+      "console": "internalConsole"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "videoFile",
+      "type": "promptString",
+      "description": "Full path of the video to open (e.g. E:/Movies/Dune.mkv)"
+    }
+  ]
+}
