@@ -6,6 +6,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cwchar>
 
 namespace
@@ -17,6 +18,8 @@ constexpr double kSeekStepLarge = 30.0;
 constexpr int kMaxCatchUpFrames = 8;
 constexpr int kMaxSeekDecodeFrames = 1000;
 constexpr double kTitleUpdateInterval = 0.25;
+constexpr double kResyncThreshold = 1.0; // video this far behind the audio clock: skip ahead
+constexpr float kVolumeStep = 0.05f;
 
 void FormatTime(double s, wchar_t* out, size_t n)
 {
@@ -210,6 +213,12 @@ void App::OnKeyDown(WPARAM key)
         m_dirty = true;
         break;
     case 'F': ToggleFullscreen(); break;
+    case VK_UP: ChangeVolume(kVolumeStep); break;
+    case VK_DOWN: ChangeVolume(-kVolumeStep); break;
+    case 'M':
+        m_muted = !m_muted;
+        ApplyVolume();
+        break;
     case VK_ESCAPE:
         if (m_fullscreen)
             ToggleFullscreen();
@@ -240,6 +249,8 @@ void App::ShowOpenDialog()
 void App::CloseVideo()
 {
     // Release frames before the decoder so surfaces return to their pool first.
+    m_audio.Close();
+    m_hasAudio = false;
     m_current = VideoFrame{};
     m_next = VideoFrame{};
     m_decoder.Close();
@@ -279,6 +290,7 @@ void App::OpenFile(const std::wstring& path)
     m_hasVideo = true;
     m_paused = false;
     m_loggedMode = -1; // log the upscaler state again for the new file
+    m_hasAudio = m_audio.Open(path, m_current.pts, false, m_muted ? 0.0f : m_volume);
     AnchorClock(m_current.pts);
     m_dirty = true;
     UpdateTitle(true);
@@ -295,9 +307,19 @@ double App::Now() const
     return static_cast<double>(t.QuadPart) * m_qpcToSeconds;
 }
 
-double App::MediaTime() const
+double App::MediaTime()
 {
-    return m_paused ? m_anchorMedia : m_anchorMedia + (Now() - m_anchorTime);
+    if (m_paused)
+        return m_anchorMedia;
+    // Audio is the master clock. While it can't provide one (just after open/seek, after the
+    // audio stream ended, or device lost) the QPC clock continues from the last audio time.
+    double audioClock = 0.0;
+    if (m_hasAudio && m_audio.GetClock(audioClock))
+    {
+        AnchorClock(audioClock);
+        return audioClock;
+    }
+    return m_anchorMedia + (Now() - m_anchorTime);
 }
 
 void App::AnchorClock(double mediaTime)
@@ -335,15 +357,30 @@ bool App::AdvancePlayback()
         ++steps;
     }
 
-    // Too far behind (slow decode / system stall): resync the clock rather than spiral.
     if (m_next && m_next.pts <= t && steps == kMaxCatchUpFrames)
-        AnchorClock(m_current.pts);
+    {
+        if (!m_hasAudio)
+        {
+            // No audio: resync the clock to the video rather than spiral.
+            AnchorClock(m_current.pts);
+        }
+        else if (t - m_next.pts > kResyncThreshold)
+        {
+            // The audio clock can't wait for video (e.g. after the window was minimized):
+            // skip the video ahead to the audio position instead of decoding every frame.
+            LogF("Video %.2fs behind audio; skipping ahead to %.2fs", t - m_next.pts, t);
+            if (!SeekVideo(t))
+                return true;
+            changed = true;
+        }
+    }
 
     if (!m_next && m_eof)
     {
         // End of stream: hold the last frame.
         m_anchorMedia = m_current.pts;
         m_paused = true;
+        m_audio.SetPaused(true);
         UpdateTitle(true);
     }
     return changed;
@@ -363,11 +400,13 @@ void App::TogglePause()
         }
         m_paused = false;
         AnchorClock(m_anchorMedia);
+        m_audio.SetPaused(false);
     }
     else
     {
         m_anchorMedia = MediaTime();
         m_paused = true;
+        m_audio.SetPaused(true);
     }
 }
 
@@ -383,14 +422,25 @@ void App::SeekTo(double target)
         return;
     const double duration = m_decoder.Duration();
     target = std::max(0.0, duration > 0.0 ? std::min(target, duration - 0.1) : target);
+    if (!SeekVideo(target))
+        return;
 
+    // Seeking keeps the current paused/playing state. Audio restarts exactly where the
+    // video landed (the first frame at or after the target).
+    AnchorClock(m_current.pts);
+    if (m_hasAudio)
+        m_audio.Seek(m_current.pts);
+}
+
+bool App::SeekVideo(double target)
+{
     m_current = VideoFrame{};
     m_next = VideoFrame{};
     m_eof = false;
     if (!m_decoder.Seek(target))
     {
         m_eof = true;
-        return;
+        return false;
     }
 
     // Decode forward from the keyframe until we reach the target.
@@ -410,12 +460,10 @@ void App::SeekTo(double target)
     {
         CloseVideo();
         m_dirty = true;
-        return;
+        return false;
     }
-
-    // Seeking keeps the current paused/playing state.
-    AnchorClock(m_current.pts);
     m_dirty = true;
+    return true;
 }
 
 void App::CycleUpscaleMode()
@@ -452,6 +500,18 @@ void App::RenderNow()
     m_dirty = false;
 }
 
+void App::ChangeVolume(float delta)
+{
+    m_volume = std::clamp(m_volume + delta, 0.0f, 1.0f);
+    m_muted = false;
+    ApplyVolume();
+}
+
+void App::ApplyVolume()
+{
+    m_audio.SetVolume(m_muted ? 0.0f : m_volume);
+}
+
 // While a video is playing, keep the display on and the PC awake; release when paused,
 // stopped, at the end of the file or after a device loss. Only calls Windows on a change.
 void App::UpdateKeepAwake()
@@ -471,6 +531,7 @@ bool App::HandleDeviceLost()
         return m_deviceLost;
     m_deviceLost = true;
     m_paused = true;
+    m_audio.SetPaused(true);
     LogF("Rendering stopped after device removal (last upscaler: requested %s, using %s)", UpscaleModeName(m_mode),
          UpscaleModeName(m_effectiveMode));
     MessageBoxW(m_hwnd,
@@ -550,9 +611,18 @@ void App::UpdateTitle(bool force)
             swprintf(modeText, ARRAYSIZE(modeText), L"%hs -> %hs", UpscaleModeName(m_mode),
                      UpscaleModeName(m_effectiveMode));
 
-        swprintf(title, ARRAYSIZE(title), L"%ls  |  %dx%d -> %ldx%ld  |  Upscale: %ls  Q%d  |  %ls / %ls%ls  -  %ls",
-                 m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
-                 modeText, m_quality, pos, dur, m_paused ? L"  [Paused]" : L"", kAppName);
+        wchar_t audioText[32];
+        if (!m_hasAudio)
+            swprintf(audioText, ARRAYSIZE(audioText), L"No audio");
+        else if (m_muted)
+            swprintf(audioText, ARRAYSIZE(audioText), L"Muted");
+        else
+            swprintf(audioText, ARRAYSIZE(audioText), L"Vol %d%%", static_cast<int>(std::lround(m_volume * 100.0f)));
+
+        swprintf(title, ARRAYSIZE(title),
+                 L"%ls  |  %dx%d -> %ldx%ld  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls", m_fileName.c_str(),
+                 m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top, modeText, m_quality,
+                 audioText, pos, dur, m_paused ? L"  [Paused]" : L"", kAppName);
     }
     SetWindowTextW(m_hwnd, title);
 }

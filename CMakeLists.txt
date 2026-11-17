@@ -28,7 +28,7 @@ if(NOT FFMPEG_DIR)
 endif()
 
 find_path(FFMPEG_INCLUDE_DIR libavcodec/avcodec.h PATHS "${FFMPEG_DIR}/include" REQUIRED NO_DEFAULT_PATH)
-foreach(_lib avformat avcodec avutil)
+foreach(_lib avformat avcodec avutil swresample)
     find_library(FFMPEG_${_lib}_LIB NAMES ${_lib} PATHS "${FFMPEG_DIR}/lib" REQUIRED NO_DEFAULT_PATH)
 endforeach()
 
@@ -39,6 +39,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
     src/App.cpp
     src/App.h
+    src/AudioPlayer.cpp
+    src/AudioPlayer.h
     src/GpuDevice.cpp
     src/GpuDevice.h
     src/VideoDecoder.cpp
@@ -57,8 +59,8 @@ target_include_directories(DLSSVideoPlayer PRIVATE src)
 target_include_directories(DLSSVideoPlayer SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
 target_compile_definitions(DLSSVideoPlayer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(DLSSVideoPlayer PRIVATE
-    d3d11 dxgi comdlg32 shell32
-    ${FFMPEG_avformat_LIB} ${FFMPEG_avcodec_LIB} ${FFMPEG_avutil_LIB})
+    d3d11 dxgi comdlg32 shell32 ole32
+    ${FFMPEG_avformat_LIB} ${FFMPEG_avcodec_LIB} ${FFMPEG_avutil_LIB} ${FFMPEG_swresample_LIB})
 
 if(MSVC)
     target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /utf-8)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AudioPlayer.h"
 #include "GpuDevice.h"
 #include "Renderer.h"
 #include "VideoDecoder.h"
@@ -8,8 +9,9 @@
 
 // Window, input, playback clock and the main loop.
 //
-// Threading: everything (Win32 messages, FFmpeg demux/decode, D3D11 rendering) runs on
-// the UI thread. Decode happens on demand, at most one frame ahead of the one shown.
+// Threading: Win32 messages, video demux/decode and D3D11 rendering run on the UI thread;
+// video decode happens on demand, at most one frame ahead of the one shown. Audio runs on
+// AudioPlayer's own thread and is the master clock whenever the file has audio.
 class App
 {
 public:
@@ -32,9 +34,12 @@ private:
 
     void TogglePause();
     void SeekTo(double seconds);
+    bool SeekVideo(double seconds); // video only; false if the video was lost
     void SeekBy(double deltaSeconds);
     void CycleUpscaleMode();
     void ToggleFullscreen();
+    void ChangeVolume(float delta);
+    void ApplyVolume();
 
     bool AdvancePlayback(); // returns true if the displayed frame changed
     void DecodeNext();
@@ -45,13 +50,14 @@ private:
     void UpdateKeepAwake();
 
     double Now() const;
-    double MediaTime() const;
+    double MediaTime(); // audio clock when available, otherwise the QPC clock
     void AnchorClock(double mediaTime);
 
     HWND m_hwnd = nullptr;
     GpuDevice m_gpu;
     Renderer m_renderer;
     VideoDecoder m_decoder;
+    AudioPlayer m_audio;
     bool m_initialized = false;
     bool m_deviceLost = false; // GPU device removed: rendering stops until restart
 
@@ -59,6 +65,9 @@ private:
     VideoFrame m_current;
     VideoFrame m_next;
     bool m_hasVideo = false;
+    bool m_hasAudio = false;
+    float m_volume = 1.0f; // 0..1, kept across files
+    bool m_muted = false;
     bool m_paused = false;
     bool m_eof = false;
     bool m_dirty = true;

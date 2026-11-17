@@ -18,7 +18,7 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | **RTX VSR via NVIDIA driver** (D3D11 stream extension, the same path Chrome/VLC use) | done |
 | **RTX Video SDK backend** (NGX VSR feature, quality levels 1-4) | done, used by default when it initializes |
 | Play / pause / seek, frame pacing to vsync | done |
-| Audio, A/V sync | not yet (milestone 2) |
+| Audio (WASAPI, any codec/channel layout via libswresample), audio-master A/V sync, volume/mute | done |
 | HDR output, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
@@ -66,6 +66,8 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 | `U` | Toggle upscaler: Off <-> RTX Video SDK when the SDK is active; otherwise Off <-> RTX VSR (driver) |
 | `1`-`4` | VSR quality: Low / Medium / High / Ultra (RTX Video SDK backend) |
 | `F`, `Alt+Enter`, double-click | Toggle fullscreen (`Esc` leaves) |
+| `Up` / `Down` | Volume +/- 5% |
+| `M` | Mute / unmute |
 
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.
 Super resolution only runs when the video is being **enlarged**: e.g. a 1080p video in a 1080p window
@@ -93,7 +95,9 @@ player logs the reason and stops rendering; restart it.
                           every vsync: CopyResource(present -> back buffer), Present(1)
 ```
 
-- `src/App.*`: window, input, playback clock, main loop (single UI thread; decode on demand, one frame ahead)
+- `src/App.*`: window, input, playback clock, main loop (UI thread; video decode on demand, one frame ahead)
+- `src/AudioPlayer.*`: audio thread with its own reader of the file, decoder, libswresample and WASAPI output;
+  provides the master clock that video follows
 - `src/GpuDevice.*`: D3D11 device (prefers NVIDIA adapter), video interfaces, flip-model swap chain
 - `src/VideoDecoder.*`: FFmpeg demux/decode with zero-copy D3D11 surfaces on the shared device
 - `src/VideoProcessor.*`: D3D11 Video Processor wrapper, color spaces, NVIDIA driver VSR extension
