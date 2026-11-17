@@ -3,6 +3,7 @@
 #include "Log.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cwchar>
 
 namespace
@@ -18,6 +19,12 @@ constexpr wchar_t kIconVolume[] = L"";
 constexpr wchar_t kIconMute[] = L"";
 constexpr wchar_t kIconFullscreen[] = L"";
 constexpr wchar_t kIconWindowed[] = L"";
+
+constexpr wchar_t kIconAudio[] = L"\uE8D6";
+constexpr wchar_t kIconSubtitles[] = L"\uE7F0";
+constexpr wchar_t kIconCheck[] = L"\uE73E";
+constexpr float kMenuRowHeight = 30.0f;
+constexpr float kMenuWidth = 340.0f;
 
 void FormatTime(double s, wchar_t* out, size_t n)
 {
@@ -196,6 +203,8 @@ Overlay::Layout Overlay::ComputeLayout() const
     l.quality = {l.fullscreen.left - 8.0f - 44.0f, cy - 14.0f, l.fullscreen.left - 8.0f, cy + 14.0f};
     l.upscaler = {l.quality.left - 8.0f - 104.0f, cy - 14.0f, l.quality.left - 8.0f, cy + 14.0f};
     l.trueHdr = {l.upscaler.left - 8.0f - 84.0f, cy - 14.0f, l.upscaler.left - 8.0f, cy + 14.0f};
+    l.subsButton = button(l.trueHdr.left - 8.0f - b);
+    l.audioButton = button(l.subsButton.left - 4.0f - b);
 
     // Tuning panel: bottom-right, just above the control bar.
     const float pw = 320.0f, rowH = 34.0f, titleH = 40.0f, footH = 44.0f;
@@ -228,14 +237,130 @@ void Overlay::Text(const wchar_t* text, IDWriteTextFormat* format, const D2D1_RE
     m_context->DrawText(text, static_cast<UINT32>(wcslen(text)), format, r, m_brush.Get());
 }
 
+D2D1_RECT_F Overlay::MenuRect(const Layout& l, OverlayPart anchor, int count) const
+{
+    const D2D1_RECT_F& b = anchor == OverlayPart::AudioButton ? l.audioButton : l.subsButton;
+    const float h = static_cast<float>(count) * kMenuRowHeight + 12.0f;
+    const float right = std::min(b.right + 8.0f, l.width - 8.0f);
+    const float left = std::max(8.0f, right - kMenuWidth);
+    const float bottom = l.bar.top - 8.0f;
+    return {left, std::max(8.0f, bottom - h), right, bottom};
+}
+
+void Overlay::DrawSubtitles(const OverlayState& s)
+{
+    const float scale = Scale();
+    const D2D1_RECT_F video{static_cast<float>(s.videoRect.left) / scale, static_cast<float>(s.videoRect.top) / scale,
+                            static_cast<float>(s.videoRect.right) / scale, static_cast<float>(s.videoRect.bottom) / scale};
+    const float vw = video.right - video.left, vh = video.bottom - video.top;
+    if (vw <= 1.0f || vh <= 1.0f)
+        return;
+    ++m_frameCounter;
+
+    // Image subtitles (PGS / VobSub): placed on their canvas, scaled to the video rect.
+    for (int i = 0; i < s.subCount; ++i)
+    {
+        const SubEvent& ev = *s.subs[i];
+        const float cw = static_cast<float>(ev.canvasW > 0 ? ev.canvasW : s.videoW);
+        const float ch = static_cast<float>(ev.canvasH > 0 ? ev.canvasH : s.videoH);
+        if (cw <= 0.0f || ch <= 0.0f)
+            continue;
+        for (size_t k = 0; k < ev.images.size() && k < 256; ++k)
+        {
+            const SubImage& img = ev.images[k];
+            const uint64_t key = (ev.id << 8) | k;
+            CachedBitmap& cached = m_subBitmaps[key];
+            if (!cached.bitmap)
+            {
+                const D2D1_BITMAP_PROPERTIES props =
+                    D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                m_context->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(img.w), static_cast<UINT32>(img.h)),
+                                        img.bgra.data(), static_cast<UINT32>(img.w) * 4, &props, &cached.bitmap);
+            }
+            cached.lastUsed = m_frameCounter;
+            if (!cached.bitmap)
+                continue;
+            const float sx = vw / cw, sy = vh / ch;
+            const D2D1_RECT_F dst{video.left + static_cast<float>(img.x) * sx, video.top + static_cast<float>(img.y) * sy,
+                                  video.left + static_cast<float>(img.x + img.w) * sx,
+                                  video.top + static_cast<float>(img.y + img.h) * sy};
+            m_context->DrawBitmap(cached.bitmap.Get(), dst, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        }
+    }
+    // Forget bitmaps of events that are no longer shown.
+    for (auto it = m_subBitmaps.begin(); it != m_subBitmaps.end();)
+        it = it->second.lastUsed == m_frameCounter ? std::next(it) : m_subBitmaps.erase(it);
+
+    // Text subtitles: joined, bottom-centered in the video, white with a black outline.
+    m_subText.clear();
+    for (int i = 0; i < s.subCount; ++i)
+    {
+        if (s.subs[i]->text.empty())
+            continue;
+        if (!m_subText.empty())
+            m_subText += L'\n';
+        m_subText += s.subs[i]->text;
+    }
+    if (m_subText.empty())
+        return;
+
+    const float fontSize = std::clamp(vh * 0.045f, 16.0f, 72.0f);
+    if (!m_subFormat || std::abs(fontSize - m_subFontSize) > 0.5f)
+    {
+        m_subFormat.Reset();
+        m_subLayout.Reset();
+        if (FAILED(m_dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                              DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, fontSize, L"",
+                                              &m_subFormat)))
+            return;
+        m_subFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        m_subFormat->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        m_subFontSize = fontSize;
+    }
+    const float maxWidth = vw * 0.92f;
+    if (!m_subLayout || m_subText != m_subLayoutText || std::abs(maxWidth - m_subLayoutWidth) > 0.5f)
+    {
+        m_subLayout.Reset();
+        if (FAILED(m_dwrite->CreateTextLayout(m_subText.c_str(), static_cast<UINT32>(m_subText.size()),
+                                              m_subFormat.Get(), maxWidth, vh, &m_subLayout)))
+            return;
+        m_subLayoutText = m_subText;
+        m_subLayoutWidth = maxWidth;
+    }
+    DWRITE_TEXT_METRICS metrics{};
+    m_subLayout->GetMetrics(&metrics);
+
+    // Lift the subtitles above the control bar while it is visible.
+    const float barTop = ComputeLayout().bar.top;
+    const float raise = std::max(0.0f, video.bottom - barTop) * s.barOpacity;
+    const float x = video.left + (vw - maxWidth) * 0.5f;
+    const float y = video.bottom - vh * 0.05f - raise - metrics.height;
+
+    const float o = std::max(1.5f, fontSize * 0.06f);
+    static const float kDirs[8][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-0.7f, -0.7f}, {0.7f, -0.7f}, {-0.7f, 0.7f}, {0.7f, 0.7f}};
+    m_brush->SetColor(D2D1::ColorF(kBlack, 1.0f));
+    for (const auto& d : kDirs)
+        m_context->DrawTextLayout(D2D1::Point2F(x + d[0] * o, y + d[1] * o), m_subLayout.Get(), m_brush.Get());
+    m_brush->SetColor(D2D1::ColorF(kWhite, 1.0f));
+    m_context->DrawTextLayout(D2D1::Point2F(x, y), m_subLayout.Get(), m_brush.Get());
+}
+
 bool Overlay::Draw(const OverlayState& s)
 {
     m_lastHasAudio = s.hasAudio;
     m_lastShowQuality = s.showQuality;
     m_lastShowTrueHdr = s.showTrueHdr;
     m_lastTuneOpen = s.tuneOpen;
-    if (!m_context || (s.barOpacity <= 0.001f && (!s.osdText || s.osdOpacity <= 0.001f)))
+    m_lastShowAudio = s.showAudioButton;
+    m_lastShowSubs = s.showSubsButton;
+    m_lastMenu = s.menuItems ? s.openMenu : OverlayPart::None;
+    m_lastMenuCount = s.menuItems ? static_cast<int>(s.menuItems->size()) : 0;
+    if (!m_context ||
+        (s.barOpacity <= 0.001f && (!s.osdText || s.osdOpacity <= 0.001f) && s.subCount == 0))
+    {
+        m_subBitmaps.clear();
         return false;
+    }
     if (!EnsureTarget())
         return false;
 
@@ -244,6 +369,9 @@ bool Overlay::Draw(const OverlayState& s)
     m_context->SetTransform(D2D1::Matrix3x2F::Identity());
     if (m_offscreen)
         m_context->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+    m_opacity = 1.0f;
+    DrawSubtitles(s); // under the controls
 
     if (s.barOpacity > 0.001f)
     {
@@ -343,6 +471,40 @@ bool Overlay::Draw(const OverlayState& s)
         highlight(OverlayPart::Fullscreen, l.fullscreen);
         Text(s.fullscreen ? kIconWindowed : kIconFullscreen, m_icons.Get(), l.fullscreen, kWhite, 1.0f);
 
+        // Audio / subtitle track buttons.
+        if (s.showAudioButton)
+        {
+            if (s.hover == OverlayPart::AudioButton || s.openMenu == OverlayPart::AudioButton)
+                Fill(l.audioButton, kWhite, 0.15f, 6.0f);
+            Text(kIconAudio, m_icons.Get(), l.audioButton, kWhite, 1.0f);
+        }
+        if (s.showSubsButton)
+        {
+            if (s.hover == OverlayPart::SubsButton || s.openMenu == OverlayPart::SubsButton)
+                Fill(l.subsButton, kWhite, 0.15f, 6.0f);
+            Text(kIconSubtitles, m_icons.Get(), l.subsButton, s.subsOn ? kAccent : kWhite, 1.0f);
+        }
+
+        // Track menu.
+        if (s.menuItems && !s.menuItems->empty() &&
+            (s.openMenu == OverlayPart::AudioButton || s.openMenu == OverlayPart::SubsButton))
+        {
+            const int count = static_cast<int>(s.menuItems->size());
+            const D2D1_RECT_F menu = MenuRect(l, s.openMenu, count);
+            Fill(menu, kBlack, 0.85f, 8.0f);
+            for (int i = 0; i < count; ++i)
+            {
+                const float top = menu.top + 6.0f + static_cast<float>(i) * kMenuRowHeight;
+                const D2D1_RECT_F row{menu.left + 6.0f, top, menu.right - 6.0f, top + kMenuRowHeight};
+                if (i == s.menuHover)
+                    Fill(row, kWhite, 0.15f, 5.0f);
+                if (i == s.menuSelected)
+                    Text(kIconCheck, m_icons.Get(), {row.left, row.top, row.left + 28.0f, row.bottom}, kAccent, 1.0f);
+                Text((*s.menuItems)[static_cast<size_t>(i)].c_str(), m_textLeft.Get(),
+                     {row.left + 32.0f, row.top, row.right - 6.0f, row.bottom}, kWhite, i == s.menuSelected ? 1.0f : 0.85f);
+            }
+        }
+
         if (s.tuneOpen)
         {
             static const wchar_t* const kLabels[3] = {L"Contrast", L"Saturation", L"Middle gray"};
@@ -408,13 +570,28 @@ bool Overlay::Draw(const OverlayState& s)
     return SUCCEEDED(hr);
 }
 
-OverlayPart Overlay::HitTest(int x, int y) const
+OverlayPart Overlay::HitTest(int x, int y, int* itemIndex) const
 {
     if (!m_context)
         return OverlayPart::None;
     const float s = Scale();
     const float dx = static_cast<float>(x) / s, dy = static_cast<float>(y) / s;
     const Layout l = ComputeLayout();
+    if (m_lastMenu != OverlayPart::None && m_lastMenuCount > 0)
+    {
+        const D2D1_RECT_F menu = MenuRect(l, m_lastMenu, m_lastMenuCount);
+        if (Contains(menu, dx, dy))
+        {
+            const int i = static_cast<int>((dy - menu.top - 6.0f) / kMenuRowHeight);
+            if (i >= 0 && i < m_lastMenuCount)
+            {
+                if (itemIndex)
+                    *itemIndex = i;
+                return OverlayPart::MenuItem;
+            }
+            return OverlayPart::Menu;
+        }
+    }
     if (m_lastTuneOpen && Contains(l.tunePanel, dx, dy))
     {
         for (int i = 0; i < 3; ++i)
@@ -434,6 +611,10 @@ OverlayPart Overlay::HitTest(int x, int y) const
         return OverlayPart::Volume;
     if (m_lastShowTrueHdr && Contains(l.trueHdr, dx, dy))
         return OverlayPart::TrueHdr;
+    if (m_lastShowAudio && Contains(l.audioButton, dx, dy))
+        return OverlayPart::AudioButton;
+    if (m_lastShowSubs && Contains(l.subsButton, dx, dy))
+        return OverlayPart::SubsButton;
     if (Contains(l.upscaler, dx, dy))
         return OverlayPart::Upscaler;
     if (m_lastShowQuality && Contains(l.quality, dx, dy))

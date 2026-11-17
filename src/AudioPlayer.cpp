@@ -71,7 +71,7 @@ AudioPlayer::~AudioPlayer()
 // UI thread
 // ---------------------------------------------------------------------------
 
-bool AudioPlayer::Open(const std::wstring& path, double startPts, bool startPaused, float volume)
+bool AudioPlayer::Open(const std::wstring& path, double startPts, bool startPaused, float volume, int streamIndex)
 {
     Close();
 
@@ -85,7 +85,7 @@ bool AudioPlayer::Open(const std::wstring& path, double startPts, bool startPaus
     }
 
     const AVCodec* codec = nullptr;
-    m_streamIndex = av_find_best_stream(m_fmtCtx, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
+    m_streamIndex = av_find_best_stream(m_fmtCtx, AVMEDIA_TYPE_AUDIO, streamIndex, -1, &codec, 0);
     if (m_streamIndex < 0 || !codec)
     {
         LogF("Audio: no decodable audio stream; playing video only");
@@ -122,6 +122,7 @@ bool AudioPlayer::Open(const std::wstring& path, double startPts, bool startPaus
     m_flushSent = false;
     m_drainedLogged = false;
     m_deviceFailed = false;
+    m_deviceFailedFlag = false;
     m_quit = false;
     m_paused = startPaused;
     m_volume = volume;
@@ -500,6 +501,7 @@ void AudioPlayer::Fill()
     if (FAILED(hr))
     {
         m_deviceFailed = true;
+        m_deviceFailedFlag = true;
         LogF("Audio: output device lost or changed (0x%08lx); continuing without audio",
              static_cast<unsigned long>(hr));
         PublishClock(m_writtenPts, false, false);
@@ -519,6 +521,7 @@ void AudioPlayer::Fill()
         if (FAILED(hr = m_render->GetBuffer(n, &data)))
         {
             m_deviceFailed = true;
+        m_deviceFailedFlag = true;
             LogF("Audio: GetBuffer failed (0x%08lx); continuing without audio", static_cast<unsigned long>(hr));
             PublishClock(m_writtenPts, false, false);
             return;

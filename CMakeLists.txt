@@ -39,6 +39,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
     src/App.cpp
     src/App.h
+    src/AudioDeviceWatcher.cpp
+    src/AudioDeviceWatcher.h
     src/AudioPlayer.cpp
     src/AudioPlayer.h
     src/DisplayInfo.cpp
@@ -57,6 +59,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/Renderer.h
     src/Settings.cpp
     src/Settings.h
+    src/Subtitles.cpp
+    src/Subtitles.h
     src/Log.h
     src/upscalers/IUpscaler.h
     src/upscalers/RtxVideoSdkUpscaler.cpp

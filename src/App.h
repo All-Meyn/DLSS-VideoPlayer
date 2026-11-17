@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AudioDeviceWatcher.h"
 #include "AudioPlayer.h"
 #include "DisplayInfo.h"
 #include "GpuDevice.h"
@@ -7,6 +8,7 @@
 #include "OutputPass.h"
 #include "Renderer.h"
 #include "Settings.h"
+#include "Subtitles.h"
 #include "VideoDecoder.h"
 
 #include <string>
@@ -49,6 +51,17 @@ private:
     void SetQuality(int quality);
     void ToggleTrueHdr();
     void ToggleTunePanel();
+
+    // Audio / subtitle tracks
+    void BuildTrackMenus();
+    void SelectAudioTrack(int choice);    // index into m_decoder.AudioStreams()
+    void SelectSubtitleTrack(int choice, bool reseek = true); // index into m_subMenu (0 = off)
+    const SubtitleTrack* CurrentSubtitleTrack() const;
+    void ToggleMenu(OverlayPart menu);
+
+    // Robustness
+    void ReopenAudio(const char* reason);
+    bool RecoverDevice();
     void SetTuneValue(int row, unsigned value);
     void ApplyTrueHdrSettings();
 
@@ -81,6 +94,7 @@ private:
     void AnchorClock(double mediaTime);
 
     HWND m_hwnd = nullptr;
+    Options m_options;
     GpuDevice m_gpu;
     Renderer m_renderer;
     Overlay m_overlay;
@@ -103,6 +117,21 @@ private:
     bool m_tuneOpen = false;         // RTX Video HDR tuning panel (T)
     int m_tuneRow = 0;
     int m_draggingTune = -1;
+
+    // Tracks of the open file
+    std::wstring m_filePath;
+    std::vector<ExternalSubtitle> m_externalSubs;
+    std::vector<std::wstring> m_audioMenu;
+    std::vector<std::wstring> m_subMenu; // "Off", embedded tracks, then external files
+    int m_audioChoice = -1;
+    int m_subChoice = 0;
+    OverlayPart m_openMenu = OverlayPart::None; // AudioButton / SubsButton
+    int m_menuHover = -1;
+
+    // Robustness
+    AudioDeviceWatcher m_audioWatcher;
+    bool m_audioReopenPending = false;
+    double m_lastDeviceRecovery = -1e9;
 
     // Playback state
     VideoFrame m_current;

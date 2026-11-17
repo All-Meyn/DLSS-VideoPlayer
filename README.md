@@ -25,7 +25,10 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | RTX Video HDR (SDK TrueHDR): SDR video converted to HDR10 on HDR displays after VSR; on by default, `H` / RTX HDR chip toggles | done |
 | HDR10 -> SDR tone mapping (BT.2390 EETF on max RGB, content peak from MaxCLL / mastering metadata -> 203 nits, 10-bit output) when Windows HDR is off | done |
 | RTX Video HDR tuning panel (`T`): contrast, saturation, middle gray; saved in `%APPDATA%\\DLSSVideoPlayer\\settings.ini` | done |
-| HLG, interlaced content, software-decode fallback | not yet |
+| Audio track selection (`A` / Audio menu) | done |
+| Subtitles: embedded text (SRT/ASS/WebVTT/mov_text, shown as plain outlined text) and image (PGS/VobSub) tracks, external `.srt/.ass/.ssa/.vtt` next to the video; `S` / Subs menu | done |
+| Robustness: audio follows default-device changes / device loss; GPU device reset recovery (rebuild + resume) | done |
+| ASS styling (libass), HLG, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
 
@@ -75,6 +78,7 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 | `Up` / `Down` | Volume +/- 5% |
 | `M` | Mute / unmute |
 | `H` | RTX Video HDR on/off (SDR videos on a display with Windows HDR on) |
+| `A` / `S` | Next audio track / next subtitle track (incl. off); also the Audio and Subs buttons on the control bar |
 | `T` | RTX Video HDR tuning panel (arrows select/adjust, Shift = fine steps, Esc/T closes; or drag the sliders) |
 | Mouse | Move to show the control bar (hides after 2.5 s; cursor hides too in fullscreen). Click/drag the seek bar (hover shows the time), drag the volume slider, click the buttons. Wheel = volume. Double-click the video = fullscreen. |
 
