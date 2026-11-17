@@ -42,6 +42,7 @@ private:
     void LogUpscalerStateIfChanged();
     void UpdateTitle(bool force);
     bool HandleDeviceLost();
+    void UpdateKeepAwake();
 
     double Now() const;
     double MediaTime() const;
@@ -62,6 +63,7 @@ private:
     bool m_eof = false;
     bool m_dirty = true;
     bool m_minimized = false;
+    bool m_keepAwake = false; // display/system sleep blocked while playing
     std::wstring m_fileName;
 
     // Clock: media time = anchorMedia + (now - anchorTime) while playing.

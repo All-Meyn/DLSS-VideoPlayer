@@ -86,6 +86,7 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
 
         if (m_minimized || m_deviceLost)
         {
+            UpdateKeepAwake(); // releases it after a device loss
             WaitMessage();
             continue;
         }
@@ -102,10 +103,12 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
 
         if (HandleDeviceLost())
             continue;
+        UpdateKeepAwake();
         UpdateTitle(false);
     }
 
     CloseVideo();
+    UpdateKeepAwake(); // releases the request (no video any more)
     return 0;
 }
 
@@ -447,6 +450,17 @@ void App::RenderNow()
     }
     m_renderer.Present();
     m_dirty = false;
+}
+
+// While a video is playing, keep the display on and the PC awake; release when paused,
+// stopped, at the end of the file or after a device loss. Only calls Windows on a change.
+void App::UpdateKeepAwake()
+{
+    const bool want = m_hasVideo && !m_paused && !m_deviceLost;
+    if (want == m_keepAwake)
+        return;
+    m_keepAwake = want;
+    SetThreadExecutionState(want ? (ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) : ES_CONTINUOUS);
 }
 
 // Stops rendering (instead of failing every frame) once the driver has removed the device.
