@@ -14,6 +14,7 @@
 #if defined(DLSSVP_HAS_RTX_VIDEO_SDK)
 
 #include <nvsdk_ngx.h>
+#include <nvsdk_ngx_helpers_truehdr.h>
 #include <nvsdk_ngx_helpers_vsr.h>
 
 #include <algorithm>
@@ -47,6 +48,10 @@ class RtxVideoSdkUpscaler final : public IUpscaler
 public:
     ~RtxVideoSdkUpscaler() override
     {
+        if (m_thdrHandle)
+            NVSDK_NGX_D3D11_ReleaseFeature(m_thdrHandle);
+        if (m_thdrParams)
+            NVSDK_NGX_D3D11_DestroyParameters(m_thdrParams);
         if (m_handle)
             NVSDK_NGX_D3D11_ReleaseFeature(m_handle);
         if (m_params)
@@ -74,6 +79,7 @@ public:
 
         // Capability check (best effort: an older driver may not support capability queries).
         NVSDK_NGX_Parameter* caps = nullptr;
+        int trueHdrAvailable = 1; // unknown -> try
         r = NVSDK_NGX_D3D11_GetCapabilityParameters(&caps);
         if (NVSDK_NGX_SUCCEED(r) && caps)
         {
@@ -81,6 +87,8 @@ public:
             int needsDriver = 0;
             NVSDK_NGX_Parameter_GetI(caps, NVSDK_NGX_Parameter_VSR_Available, &available);
             NVSDK_NGX_Parameter_GetI(caps, NVSDK_NGX_Parameter_VSR_NeedsUpdatedDriver, &needsDriver);
+            trueHdrAvailable = 0;
+            NVSDK_NGX_Parameter_GetI(caps, NVSDK_NGX_Parameter_TrueHDR_Available, &trueHdrAvailable);
             NVSDK_NGX_D3D11_DestroyParameters(caps);
             if (needsDriver)
             {
@@ -108,13 +116,42 @@ public:
         }
 
         LogF("RTX Video SDK: VSR feature created");
+
+        // RTX Video HDR (TrueHDR) on the same NGX instance, with its own parameter map.
+        // Optional: VSR keeps working if it isn't available.
+        if (trueHdrAvailable)
+        {
+            r = NVSDK_NGX_D3D11_AllocateParameters(&m_thdrParams);
+            if (NVSDK_NGX_SUCCEED(r) && m_thdrParams)
+            {
+                NVSDK_NGX_Feature_Create_Params thdrCreate{};
+                r = NGX_D3D11_CREATE_TRUEHDR_EXT(context, &m_thdrHandle, m_thdrParams, &thdrCreate);
+            }
+            if (NVSDK_NGX_FAILED(r) || !m_thdrHandle)
+            {
+                LogF("RTX Video SDK: RTX Video HDR (TrueHDR) unavailable: %ls (0x%08x)", ResultText(r),
+                     static_cast<unsigned>(r));
+                m_thdrHandle = nullptr;
+            }
+            else
+            {
+                LogF("RTX Video SDK: RTX Video HDR (TrueHDR) feature created");
+            }
+        }
+        else
+        {
+            LogF("RTX Video SDK: RTX Video HDR (TrueHDR) not available on this system/driver");
+        }
         return true;
     }
 
-    // NGX lists RGBA8 as its 8-bit buffer format; the output must be UAV-capable
-    // (NVSDK_NGX_Result_FAIL_RWFlagMissing otherwise).
-    DXGI_FORMAT InputFormat() const override { return DXGI_FORMAT_R8G8B8A8_UNORM; }
-    DXGI_FORMAT OutputFormat() const override { return DXGI_FORMAT_R8G8B8A8_UNORM; }
+    // RTX Video SDK (D3D11) VSR formats: 8-bit RGBA/BGRA for SDR, RGB10A2 for 10-bit SDR or
+    // HDR10 (PQ). The output must be UAV-capable (NVSDK_NGX_Result_FAIL_RWFlagMissing otherwise).
+    bool SupportsFormat(DXGI_FORMAT format) const override
+    {
+        return format == DXGI_FORMAT_R8G8B8A8_UNORM || format == DXGI_FORMAT_B8G8R8A8_UNORM ||
+               format == DXGI_FORMAT_R10G10B10A2_UNORM;
+    }
     UINT InputBindFlags() const override { return D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE; }
     UINT OutputBindFlags() const override
     {
@@ -149,6 +186,39 @@ public:
         return true;
     }
 
+    bool SupportsSdrToHdr() const override { return m_thdrHandle != nullptr; }
+
+    bool SdrToHdr(ID3D11Texture2D* input, const RECT& inRect, ID3D11Texture2D* output, const RECT& outRect,
+                  const SdrToHdrSettings& settings) override
+    {
+        if (!m_thdrHandle)
+            return false;
+        // The rects are left/top + right/bottom coordinates (TrueHDR.InLeft/InTop/InRight/InBottom).
+        NVSDK_NGX_D3D11_TRUEHDR_Eval_Params ep{};
+        ep.pInput = input;
+        ep.pOutput = output;
+        ep.InputSubrectTL = {static_cast<unsigned>(inRect.left), static_cast<unsigned>(inRect.top)};
+        ep.InputSubrectBR = {static_cast<unsigned>(inRect.right), static_cast<unsigned>(inRect.bottom)};
+        ep.OutputSubrectTL = {static_cast<unsigned>(outRect.left), static_cast<unsigned>(outRect.top)};
+        ep.OutputSubrectBR = {static_cast<unsigned>(outRect.right), static_cast<unsigned>(outRect.bottom)};
+        ep.Contrast = std::min(settings.contrast, 200u);
+        ep.Saturation = std::min(settings.saturation, 200u);
+        ep.MiddleGray = std::clamp(settings.middleGray, 10u, 100u);
+        ep.MaxLuminance = std::clamp(settings.maxLuminance, 400u, 2000u);
+
+        const NVSDK_NGX_Result r = NGX_D3D11_EVALUATE_TRUEHDR_EXT(m_context, m_thdrHandle, m_thdrParams, &ep);
+        if (NVSDK_NGX_FAILED(r))
+        {
+            if (!m_loggedThdrError)
+            {
+                LogF("RTX Video SDK: TrueHDR evaluate failed: %ls (0x%08x)", ResultText(r), static_cast<unsigned>(r));
+                m_loggedThdrError = true;
+            }
+            return false;
+        }
+        return true;
+    }
+
 private:
     ID3D11Device* m_device = nullptr;          // owned by GpuDevice, outlives this object
     ID3D11DeviceContext* m_context = nullptr;  // owned by GpuDevice
@@ -156,6 +226,9 @@ private:
     NVSDK_NGX_Handle* m_handle = nullptr;
     bool m_ngxInitialized = false;
     bool m_loggedEvalError = false;
+    NVSDK_NGX_Parameter* m_thdrParams = nullptr;
+    NVSDK_NGX_Handle* m_thdrHandle = nullptr;
+    bool m_loggedThdrError = false;
 };
 } // namespace
 

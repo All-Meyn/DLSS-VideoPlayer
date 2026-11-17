@@ -1,9 +1,14 @@
 #pragma once
 
+#include "AudioDeviceWatcher.h"
 #include "AudioPlayer.h"
+#include "DisplayInfo.h"
 #include "GpuDevice.h"
 #include "Overlay.h"
+#include "OutputPass.h"
 #include "Renderer.h"
+#include "Settings.h"
+#include "Subtitles.h"
 #include "VideoDecoder.h"
 
 #include <string>
@@ -44,6 +49,21 @@ private:
     void ToggleMute();
     void ApplyVolume();
     void SetQuality(int quality);
+    void ToggleTrueHdr();
+    void ToggleTunePanel();
+
+    // Audio / subtitle tracks
+    void BuildTrackMenus();
+    void SelectAudioTrack(int choice);    // index into m_decoder.AudioStreams()
+    void SelectSubtitleTrack(int choice, bool reseek = true); // index into m_subMenu (0 = off)
+    const SubtitleTrack* CurrentSubtitleTrack() const;
+    void ToggleMenu(OverlayPart menu);
+
+    // Robustness
+    void ReopenAudio(const char* reason);
+    bool RecoverDevice();
+    void SetTuneValue(int row, unsigned value);
+    void ApplyTrueHdrSettings();
 
     // On-screen controls
     void OnMouseMove(int x, int y);
@@ -58,6 +78,9 @@ private:
     void ShowSeekOsd();
     void PresentFrame(); // back buffer <- video frame, overlay on top, Present
 
+    // SDR or HDR10 output, from the current file and the monitor the window is on.
+    void UpdateOutputMode();
+
     bool AdvancePlayback(); // returns true if the displayed frame changed
     void DecodeNext();
     void RenderNow();
@@ -71,13 +94,44 @@ private:
     void AnchorClock(double mediaTime);
 
     HWND m_hwnd = nullptr;
+    Options m_options;
     GpuDevice m_gpu;
     Renderer m_renderer;
     Overlay m_overlay;
+    OutputPass m_outputPass;
     VideoDecoder m_decoder;
     AudioPlayer m_audio;
     bool m_initialized = false;
     bool m_deviceLost = false; // GPU device removed: rendering stops until restart
+    DisplayInfo m_display;
+    OutputMode m_outputMode = OutputMode::Sdr8;
+    bool m_trueHdrEnabled = true; // RTX Video HDR for SDR videos on HDR displays (H toggles)
+    bool m_trueHdrOutput = false; // current output is SDR content converted by RTX Video HDR
+    bool m_contentIsHdr10 = false; // current file is HDR10 (RTX Video HDR doesn't apply)
+    DXGI_FORMAT m_sdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    bool m_pqVideo = false;          // HDR10 source kept as PQ in the presentation texture
+    bool m_toneMap = false;          // ...and tone-mapped to SDR by OutputPass (Windows HDR off)
+    float m_contentPeakNits = 1000.0f;
+    unsigned m_thdrMaxLuminance = 1000;
+    Settings m_settings;             // persisted (RTX Video HDR tuning)
+    bool m_tuneOpen = false;         // RTX Video HDR tuning panel (T)
+    int m_tuneRow = 0;
+    int m_draggingTune = -1;
+
+    // Tracks of the open file
+    std::wstring m_filePath;
+    std::vector<ExternalSubtitle> m_externalSubs;
+    std::vector<std::wstring> m_audioMenu;
+    std::vector<std::wstring> m_subMenu; // "Off", embedded tracks, then external files
+    int m_audioChoice = -1;
+    int m_subChoice = 0;
+    OverlayPart m_openMenu = OverlayPart::None; // AudioButton / SubsButton
+    int m_menuHover = -1;
+
+    // Robustness
+    AudioDeviceWatcher m_audioWatcher;
+    bool m_audioReopenPending = false;
+    double m_lastDeviceRecovery = -1e9;
 
     // Playback state
     VideoFrame m_current;

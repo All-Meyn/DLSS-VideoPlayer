@@ -1,10 +1,14 @@
 #pragma once
 
 #include "GpuDevice.h"
+#include "Subtitles.h"
 
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
+
+#include <string>
+#include <unordered_map>
 
 using Microsoft::WRL::ComPtr;
 
@@ -16,9 +20,19 @@ enum class OverlayPart
     PlayPause,
     Mute,
     Volume,
+    TrueHdr,
     Upscaler,
     Quality,
     Fullscreen,
+    AudioButton,    // opens the audio track menu
+    SubsButton,     // opens the subtitle track menu
+    Menu,           // track menu background
+    MenuItem,       // track menu entry (index via HitTest's itemIndex)
+    TunePanel,      // RTX Video HDR tuning panel background
+    TuneContrast,   // tuning rows: TuneContrast + row index
+    TuneSaturation,
+    TuneMiddleGray,
+    TuneReset,
 };
 
 // Everything the overlay needs to draw one frame. Filled by App; plain data, no ownership.
@@ -38,9 +52,31 @@ struct OverlayState
     bool upscalerOn = false;
     bool showQuality = false;
     int quality = 4;
+    bool showTrueHdr = false; // RTX Video HDR toggle is meaningful (SDR video, HDR display)
+    bool trueHdrOn = false;
+    // RTX Video HDR tuning panel (T)
+    bool tuneOpen = false;
+    int tuneRow = 0; // keyboard-selected row: 0 contrast, 1 saturation, 2 middle gray
+    unsigned tuneValues[3] = {100, 100, 50};
     OverlayPart hover = OverlayPart::None;
     const wchar_t* osdText = nullptr; // centered status message
     float osdOpacity = 0.0f;
+
+    // Subtitles visible now (pointers valid during Draw only) and where the video is.
+    static constexpr int kMaxSubs = 8;
+    const SubEvent* subs[kMaxSubs] = {};
+    int subCount = 0;
+    RECT videoRect{};      // client pixels
+    int videoW = 0, videoH = 0; // source size (canvas for image subs that don't specify one)
+
+    // Track selection
+    bool showAudioButton = false; // file has more than one audio track
+    bool showSubsButton = false;  // file has subtitle tracks
+    bool subsOn = false;
+    OverlayPart openMenu = OverlayPart::None; // AudioButton / SubsButton when its menu is open
+    const std::vector<std::wstring>* menuItems = nullptr;
+    int menuSelected = -1;
+    int menuHover = -1;
 };
 
 // Player control bar + on-screen messages drawn with Direct2D / DirectWrite straight onto
@@ -56,12 +92,20 @@ public:
     void ReleaseTarget();
     void OnDpiChanged();
 
-    void Draw(const OverlayState& state);
+    // HDR output: draw into an offscreen premultiplied RGBA8 texture that OutputPass blends
+    // in at SDR white, instead of directly into the (SDR) back buffer.
+    void SetOffscreen(bool offscreen);
+    ID3D11ShaderResourceView* OffscreenSrv() const { return m_offscreenSrv.Get(); }
 
-    // Hit testing in client-area pixels against the current layout.
-    OverlayPart HitTest(int x, int y) const;
+    // Returns true if anything was drawn this frame.
+    bool Draw(const OverlayState& state);
+
+    // Hit testing in client-area pixels against the current layout. For MenuItem,
+    // *itemIndex receives the entry index.
+    OverlayPart HitTest(int x, int y, int* itemIndex = nullptr) const;
     double SeekFraction(int x) const;   // 0..1 along the seek bar
     float VolumeFraction(int x) const;  // 0..1 along the volume slider
+    float TuneFraction(int row, int x) const; // 0..1 along a tuning slider
 
 private:
     struct Layout
@@ -70,10 +114,14 @@ private:
         D2D1_RECT_F gradient{}, bar{};
         D2D1_RECT_F seekTrack{}, seekHit{};
         D2D1_RECT_F play{}, mute{}, volumeTrack{}, volumeHit{}, time{};
-        D2D1_RECT_F upscaler{}, quality{}, fullscreen{};
+        D2D1_RECT_F trueHdr{}, upscaler{}, quality{}, fullscreen{};
+        D2D1_RECT_F audioButton{}, subsButton{};
+        D2D1_RECT_F tunePanel{}, tuneRows[3]{}, tuneTracks[3]{}, tuneReset{};
     };
 
     bool EnsureTarget();
+    void DrawSubtitles(const OverlayState& s);
+    D2D1_RECT_F MenuRect(const Layout& l, OverlayPart anchor, int count) const;
     Layout ComputeLayout() const;
     float Scale() const { return m_dpi / 96.0f; }
 
@@ -88,6 +136,9 @@ private:
     ComPtr<ID2D1Device> m_device;
     ComPtr<ID2D1DeviceContext> m_context;
     ComPtr<ID2D1Bitmap1> m_target;
+    bool m_offscreen = false;
+    ComPtr<ID3D11Texture2D> m_offscreenTex;
+    ComPtr<ID3D11ShaderResourceView> m_offscreenSrv;
     ComPtr<ID2D1SolidColorBrush> m_brush;
     ComPtr<ID2D1LinearGradientBrush> m_gradient;
 
@@ -100,4 +151,25 @@ private:
     float m_opacity = 1.0f; // current bar opacity, applied by Fill/Text
     bool m_lastHasAudio = false;    // from the last Draw, for hit testing
     bool m_lastShowQuality = false; // from the last Draw, for hit testing
+    bool m_lastShowTrueHdr = false; // from the last Draw, for hit testing
+    bool m_lastTuneOpen = false;    // from the last Draw, for hit testing
+    bool m_lastShowAudio = false;
+    bool m_lastShowSubs = false;
+    OverlayPart m_lastMenu = OverlayPart::None;
+    int m_lastMenuCount = 0;
+
+    // Subtitle rendering caches (rebuilt only when the text / size changes).
+    ComPtr<IDWriteTextFormat> m_subFormat;
+    float m_subFontSize = 0.0f;
+    ComPtr<IDWriteTextLayout> m_subLayout;
+    std::wstring m_subText;
+    std::wstring m_subLayoutText;
+    float m_subLayoutWidth = 0.0f;
+    struct CachedBitmap
+    {
+        ComPtr<ID2D1Bitmap> bitmap;
+        uint64_t lastUsed = 0;
+    };
+    std::unordered_map<uint64_t, CachedBitmap> m_subBitmaps; // key: event id << 8 | image index
+    uint64_t m_frameCounter = 0;
 };

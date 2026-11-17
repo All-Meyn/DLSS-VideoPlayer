@@ -57,7 +57,8 @@ bool VideoProcessor::Init(ID3D11Device* device, ID3D11VideoDevice* videoDevice, 
 
 bool VideoProcessor::EnsureProcessor(const D3D11_TEXTURE2D_DESC& in, const D3D11_TEXTURE2D_DESC& out)
 {
-    if (m_processor && in.Width == m_inW && in.Height == m_inH && out.Width == m_outW && out.Height == m_outH)
+    if (m_processor && in.Width == m_inW && in.Height == m_inH && out.Width == m_outW && out.Height == m_outH &&
+        in.Format == m_inFmt && out.Format == m_outFmt)
         return true;
 
     m_processor.Reset();
@@ -110,10 +111,12 @@ bool VideoProcessor::EnsureProcessor(const D3D11_TEXTURE2D_DESC& in, const D3D11
     m_inH = in.Height;
     m_outW = out.Width;
     m_outH = out.Height;
+    m_inFmt = in.Format;
+    m_outFmt = out.Format;
     return true;
 }
 
-void VideoProcessor::ApplyColorSpace(const AVFrame* f)
+void VideoProcessor::ApplyColorSpace(const AVFrame* f, bool hdrOutput)
 {
     const Matrix matrix = PickMatrix(f);
     const bool fullRange = f && f->color_range == AVCOL_RANGE_JPEG;
@@ -138,7 +141,8 @@ void VideoProcessor::ApplyColorSpace(const AVFrame* f)
             break;
         }
         m_videoContext1->VideoProcessorSetStreamColorSpace1(m_processor.Get(), 0, in);
-        m_videoContext1->VideoProcessorSetOutputColorSpace1(m_processor.Get(), DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+        m_videoContext1->VideoProcessorSetOutputColorSpace1(
+            m_processor.Get(), hdrOutput ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
     }
     else
     {
@@ -169,7 +173,7 @@ void VideoProcessor::ApplyNvidiaVsr(bool enable)
 }
 
 bool VideoProcessor::Blit(ID3D11Texture2D* src, UINT srcSlice, const RECT& srcRect, const AVFrame* colorInfo,
-                          ID3D11Texture2D* dst, const RECT& dstRect, bool nvidiaVsr)
+                          ID3D11Texture2D* dst, const RECT& dstRect, bool nvidiaVsr, bool hdrOutput)
 {
     D3D11_TEXTURE2D_DESC inDesc{}, outDesc{};
     src->GetDesc(&inDesc);
@@ -206,7 +210,7 @@ bool VideoProcessor::Blit(ID3D11Texture2D* src, UINT srcSlice, const RECT& srcRe
     m_videoContext->VideoProcessorSetOutputBackgroundColor(vp, FALSE, &black);
     m_videoContext->VideoProcessorSetStreamSourceRect(vp, 0, TRUE, &srcRect);
     m_videoContext->VideoProcessorSetStreamDestRect(vp, 0, TRUE, &dstRect);
-    ApplyColorSpace(colorInfo);
+    ApplyColorSpace(colorInfo, hdrOutput);
     ApplyNvidiaVsr(nvidiaVsr);
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};

@@ -2,8 +2,11 @@
 
 #include <d3d11.h>
 
+#include "Subtitles.h"
+
 #include <memory>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -32,8 +35,18 @@ struct VideoFrame
     UINT ArraySlice() const { return static_cast<UINT>(reinterpret_cast<intptr_t>(frame->data[1])); }
 };
 
+// A selectable audio or subtitle stream of the open file.
+struct StreamInfo
+{
+    int index = -1;     // FFmpeg stream index
+    std::wstring label; // e.g. "English - Commentary (ac3, 5.1)"
+    bool isDefault = false;
+    bool isForced = false;
+};
+
 // Demuxes a file with libavformat and decodes its best video stream with D3D11VA,
-// on the caller's ID3D11Device. All calls must come from the same thread.
+// on the caller's ID3D11Device. Packets of the selected embedded subtitle stream are
+// decoded along the way (same reader). All calls must come from the same thread.
 class VideoDecoder
 {
 public:
@@ -57,7 +70,20 @@ public:
     double Duration() const { return m_duration; }
     const char* CodecName() const { return m_codecName; }
 
+    // Tracks found in the file. DefaultAudioStream() is FFmpeg's "best" audio stream (-1 = none).
+    const std::vector<StreamInfo>& AudioStreams() const { return m_audioStreams; }
+    const std::vector<StreamInfo>& SubtitleStreams() const { return m_subtitleStreams; }
+    int DefaultAudioStream() const { return m_defaultAudio; }
+
+    // Embedded subtitles: select a subtitle stream index (-1 = none). Events decoded so far
+    // are in Subtitles(); callers usually re-seek to the current position after switching
+    // so lines already past the read position are decoded again.
+    bool SelectSubtitleStream(int streamIndex);
+    int SelectedSubtitleStream() const { return m_subStreamIndex; }
+    const SubtitleTrack& Subtitles() const { return m_subs; }
+
 private:
+    void CloseSubtitleDecoder();
     AVFormatContext* m_fmtCtx = nullptr;
     AVCodecContext* m_codecCtx = nullptr;
     AVPacket* m_packet = nullptr;
@@ -73,4 +99,13 @@ private:
     double m_duration = 0.0;
     double m_lastPts = 0.0;
     const char* m_codecName = "";
+
+    std::vector<StreamInfo> m_audioStreams;
+    std::vector<StreamInfo> m_subtitleStreams;
+    int m_defaultAudio = -1;
+    int m_subStreamIndex = -1;
+    AVCodecContext* m_subCtx = nullptr;
+    int m_subCanvasW = 0, m_subCanvasH = 0;
+    SubtitleTrack m_subs;
+    double m_lastPrune = 0.0;
 };

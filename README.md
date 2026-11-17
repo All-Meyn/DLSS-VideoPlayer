@@ -20,7 +20,15 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | Play / pause / seek, frame pacing to vsync | done |
 | Audio (WASAPI, any codec/channel layout via libswresample), audio-master A/V sync, volume/mute | done |
 | On-screen controls (Direct2D/DirectWrite): seek bar, play/pause, volume, upscaler/quality, fullscreen, auto-hide, status messages | done |
-| HDR output, interlaced content, software-decode fallback | not yet |
+| HDR10 output on HDR displays (Windows HDR on): 10-bit PQ/BT.2020 end to end, VSR on HDR, HDR metadata, overlay at SDR white | done |
+| 10-bit SDR precision: 10-bit sources stay 10-bit through VSR and output (10-bit SDR swap chain) | done |
+| RTX Video HDR (SDK TrueHDR): SDR video converted to HDR10 on HDR displays after VSR; on by default, `H` / RTX HDR chip toggles | done |
+| HDR10 -> SDR tone mapping (BT.2390 EETF on max RGB, content peak from MaxCLL / mastering metadata -> 203 nits, 10-bit output) when Windows HDR is off | done |
+| RTX Video HDR tuning panel (`T`): contrast, saturation, middle gray; saved in `%APPDATA%\\DLSSVideoPlayer\\settings.ini` | done |
+| Audio track selection (`A` / Audio menu) | done |
+| Subtitles: embedded text (SRT/ASS/WebVTT/mov_text, shown as plain outlined text) and image (PGS/VobSub) tracks, external `.srt/.ass/.ssa/.vtt` next to the video; `S` / Subs menu | done |
+| Robustness: audio follows default-device changes / device loss; GPU device reset recovery (rebuild + resume) | done |
+| ASS styling (libass), HLG, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
 
@@ -69,6 +77,9 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 | `F`, `Alt+Enter`, double-click | Toggle fullscreen (`Esc` leaves) |
 | `Up` / `Down` | Volume +/- 5% |
 | `M` | Mute / unmute |
+| `H` | RTX Video HDR on/off (SDR videos on a display with Windows HDR on) |
+| `A` / `S` | Next audio track / next subtitle track (incl. off); also the Audio and Subs buttons on the control bar |
+| `T` | RTX Video HDR tuning panel (arrows select/adjust, Shift = fine steps, Esc/T closes; or drag the sliders) |
 | Mouse | Move to show the control bar (hides after 2.5 s; cursor hides too in fullscreen). Click/drag the seek bar (hover shows the time), drag the volume slider, click the buttons. Wheel = volume. Double-click the video = fullscreen. |
 
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.
@@ -104,7 +115,11 @@ player logs the reason and stops rendering; restart it.
 - `src/VideoDecoder.*`: FFmpeg demux/decode with zero-copy D3D11 surfaces on the shared device
 - `src/VideoProcessor.*`: D3D11 Video Processor wrapper, color spaces, NVIDIA driver VSR extension
 - `src/Renderer.*`: picks the upscaling path, letterboxing, presentation
-- `src/Overlay.*`: control bar and on-screen messages drawn with Direct2D/DirectWrite onto the back buffer
+- `src/Overlay.*`: control bar and on-screen messages drawn with Direct2D/DirectWrite (onto the back buffer in SDR,
+  offscreen in HDR)
+- `src/OutputPass.*`: HDR10 output shader (compiled at startup with d3dcompiler_47): writes the PQ video to the
+  HDR10 swap chain and blends the overlay in at the Windows SDR-white level
+- `src/DisplayInfo.*`: monitor HDR state / peak / SDR white level, HDR10 metadata from the file
 - `src/upscalers/`: pluggable texture-to-texture upscalers (RTX Video SDK / NGX VSR backend)
 
 ## Licensing

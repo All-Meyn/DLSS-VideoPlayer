@@ -4,6 +4,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/dict.h>
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_d3d11va.h>
@@ -19,6 +20,44 @@ std::string Utf8FromWide(const std::wstring& w)
     std::string s(static_cast<size_t>(len), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), s.data(), len, nullptr, nullptr);
     return s;
+}
+
+std::wstring Widen(const char* s)
+{
+    if (!s || !*s)
+        return {};
+    const int len = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+    std::wstring w(static_cast<size_t>(len > 0 ? len - 1 : 0), L'\0');
+    if (len > 1)
+        MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), len);
+    return w;
+}
+
+// "English - Commentary (ac3, 5.1)" from the stream's metadata.
+StreamInfo DescribeStream(const AVStream* st, int number)
+{
+    StreamInfo info;
+    info.index = st->index;
+    info.isDefault = (st->disposition & AV_DISPOSITION_DEFAULT) != 0;
+    info.isForced = (st->disposition & AV_DISPOSITION_FORCED) != 0;
+    const AVDictionaryEntry* lang = av_dict_get(st->metadata, "language", nullptr, 0);
+    const AVDictionaryEntry* title = av_dict_get(st->metadata, "title", nullptr, 0);
+
+    std::wstring label = lang ? Widen(lang->value) : L"Track " + std::to_wstring(number);
+    if (title && title->value[0])
+        label += L" - " + Widen(title->value);
+    label += L" (" + Widen(avcodec_get_name(st->codecpar->codec_id));
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+    {
+        const int ch = st->codecpar->ch_layout.nb_channels;
+        label += ch == 6 ? L", 5.1" : ch == 8 ? L", 7.1" : ch == 2 ? L", stereo" : ch == 1 ? L", mono"
+                                                                                : L", " + std::to_wstring(ch) + L" ch";
+    }
+    label += L")";
+    if (info.isForced)
+        label += L" [forced]";
+    info.label = std::move(label);
+    return info;
 }
 
 std::string AvErr(int err)
@@ -134,12 +173,66 @@ bool VideoDecoder::Open(const std::wstring& path, ID3D11Device* device, std::str
     m_flushSent = false;
     m_lastPts = 0.0;
 
-    LogF("Opened %s: %dx%d, codec %s, duration %.2fs", utf8Path.c_str(), m_width, m_height, m_codecName, m_duration);
+    // Audio / subtitle tracks for the selection menus.
+    m_audioStreams.clear();
+    m_subtitleStreams.clear();
+    for (unsigned i = 0; i < m_fmtCtx->nb_streams; ++i)
+    {
+        const AVStream* st = m_fmtCtx->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+            m_audioStreams.push_back(DescribeStream(st, static_cast<int>(m_audioStreams.size()) + 1));
+        else if (st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE)
+            m_subtitleStreams.push_back(DescribeStream(st, static_cast<int>(m_subtitleStreams.size()) + 1));
+    }
+    m_defaultAudio = av_find_best_stream(m_fmtCtx, AVMEDIA_TYPE_AUDIO, -1, m_streamIndex, nullptr, 0);
+
+    LogF("Opened %s: %dx%d, codec %s, duration %.2fs, %zu audio / %zu subtitle tracks", utf8Path.c_str(), m_width,
+         m_height, m_codecName, m_duration, m_audioStreams.size(), m_subtitleStreams.size());
+    return true;
+}
+
+void VideoDecoder::CloseSubtitleDecoder()
+{
+    avcodec_free_context(&m_subCtx);
+    m_subStreamIndex = -1;
+    m_subs.Clear();
+}
+
+bool VideoDecoder::SelectSubtitleStream(int streamIndex)
+{
+    CloseSubtitleDecoder();
+    if (streamIndex < 0 || !m_fmtCtx || streamIndex >= static_cast<int>(m_fmtCtx->nb_streams))
+        return streamIndex < 0;
+    const AVStream* st = m_fmtCtx->streams[streamIndex];
+    const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!codec)
+    {
+        LogF("Subtitles: no decoder for %s", avcodec_get_name(st->codecpar->codec_id));
+        return false;
+    }
+    m_subCtx = avcodec_alloc_context3(codec);
+    avcodec_parameters_to_context(m_subCtx, st->codecpar);
+    m_subCtx->pkt_timebase = st->time_base;
+    if (avcodec_open2(m_subCtx, codec, nullptr) < 0)
+    {
+        LogF("Subtitles: could not open the %s decoder", codec->name);
+        avcodec_free_context(&m_subCtx);
+        return false;
+    }
+    m_subStreamIndex = streamIndex;
+    // Image subtitles are positioned on their own canvas (usually the video size).
+    m_subCanvasW = m_subCtx->width > 0 ? m_subCtx->width : m_width;
+    m_subCanvasH = m_subCtx->height > 0 ? m_subCtx->height : m_height;
+    LogF("Subtitles: stream %d (%s)", streamIndex, codec->name);
     return true;
 }
 
 void VideoDecoder::Close()
 {
+    CloseSubtitleDecoder();
+    m_audioStreams.clear();
+    m_subtitleStreams.clear();
+    m_defaultAudio = -1;
     av_packet_free(&m_packet);
     avcodec_free_context(&m_codecCtx);
     av_buffer_unref(&m_hwDevice);
@@ -174,6 +267,11 @@ VideoDecoder::Result VideoDecoder::Decode(VideoFrame& out)
             }
             out.pts = m_lastPts;
             out.frame = std::move(frame);
+            if (m_lastPts - m_lastPrune > 5.0 || m_lastPts < m_lastPrune)
+            {
+                m_subs.Prune(m_lastPts, 30.0); // image subtitles can be large: keep ~30 s of history
+                m_lastPrune = m_lastPts;
+            }
             return Result::Frame;
         }
         if (ret == AVERROR_EOF)
@@ -202,6 +300,17 @@ VideoDecoder::Result VideoDecoder::Decode(VideoFrame& out)
             if (ret < 0 && ret != AVERROR(EAGAIN))
                 LogF("avcodec_send_packet: %s (skipping packet)", AvErr(ret).c_str());
         }
+        else if (m_subCtx && m_packet->stream_index == m_subStreamIndex)
+        {
+            // Subtitle decoding is cheap and synchronous: do it right here.
+            AVSubtitle sub{};
+            int got = 0;
+            if (avcodec_decode_subtitle2(m_subCtx, &sub, &got, m_packet) >= 0 && got)
+            {
+                m_subs.Add(sub, static_cast<double>(m_startTime) * av_q2d(m_timeBase), m_subCanvasW, m_subCanvasH);
+                avsubtitle_free(&sub);
+            }
+        }
         av_packet_unref(m_packet);
     }
 }
@@ -221,6 +330,9 @@ bool VideoDecoder::Seek(double seconds)
         return false;
     }
     avcodec_flush_buffers(m_codecCtx);
+    if (m_subCtx)
+        avcodec_flush_buffers(m_subCtx);
+    m_subs.Clear(); // re-decoded from the new position
     m_flushSent = false;
     m_lastPts = seconds;
     return true;

@@ -32,7 +32,12 @@ public:
 
     // Returns false (and logs why) if the file has no usable audio or the device fails;
     // the player then runs video-only on its own clock. Samples before startPts are dropped.
-    bool Open(const std::wstring& path, double startPts, bool startPaused, float volume);
+    // streamIndex: FFmpeg stream to play, or -1 for the file's default audio stream.
+    bool Open(const std::wstring& path, double startPts, bool startPaused, float volume, int streamIndex = -1);
+    int StreamIndex() const { return m_streamIndex; }
+
+    // True once the output device was lost/changed mid-playback (the app then reopens audio).
+    bool DeviceFailed() const { return m_deviceFailedFlag.load(); }
     void Close();
     bool IsOpen() const { return m_thread.joinable(); }
 
@@ -89,6 +94,7 @@ private:
     std::thread m_thread;
     HANDLE m_wakeEvent = nullptr; // auto-reset: new command for the audio thread
     std::atomic<bool> m_quit{false};
+    std::atomic<bool> m_deviceFailedFlag{false};
     std::atomic<bool> m_paused{false};
     std::atomic<float> m_volume{1.0f};
     std::mutex m_seekMutex;

@@ -26,6 +26,10 @@ constexpr double kBarHideDelay = 2.5; // seconds without mouse movement before t
 constexpr double kBarFadeTime = 0.15;
 constexpr double kOsdDuration = 1.2;
 constexpr double kOsdFadeTime = 0.3;
+constexpr UINT kMsgAudioDeviceChanged = WM_APP + 1;
+constexpr UINT_PTR kTimerAudioReopen = 1;
+constexpr UINT kAudioReopenDelayMs = 400; // let device changes settle (they come in bursts)
+constexpr double kMinSecondsBetweenRecoveries = 10.0;
 
 const wchar_t* QualityName(int q)
 {
@@ -72,17 +76,22 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
         return 1;
     }
 
+    m_options = options;
     if (!m_gpu.Init(m_hwnd, options.d3dDebug) || !m_renderer.Init(&m_gpu, !options.noSdk))
     {
         MessageBoxW(m_hwnd, L"Failed to initialize Direct3D 11 with video support.", kAppName, MB_ICONERROR);
         return 1;
     }
     m_initialized = true;
+    m_settings.Load();
     m_overlay.Init(&m_gpu, m_hwnd); // optional: without it the player is keyboard-only
+    if (!m_outputPass.Init(&m_gpu))
+        LogF("HDR output unavailable (shader setup failed); HDR video will be shown as SDR");
     if (m_renderer.HasRtxVideoSdk())
         m_mode = UpscaleMode::RtxVideoSdk; // prefer the SDK when it initialized
 
     DragAcceptFiles(m_hwnd, TRUE);
+    m_audioWatcher.Start(m_hwnd, kMsgAudioDeviceChanged);
     ShowWindow(m_hwnd, showCmd);
 
     if (!m_gpu.IsNvidia())
@@ -125,12 +134,18 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
 
         if (HandleDeviceLost())
             continue;
+        if (m_hasAudio && !m_audioReopenPending && m_audio.DeviceFailed())
+        {
+            m_audioReopenPending = true;
+            SetTimer(m_hwnd, kTimerAudioReopen, kAudioReopenDelayMs, nullptr);
+        }
         UpdateKeepAwake();
         UpdateTitle(false);
     }
 
     CloseVideo();
     UpdateKeepAwake(); // releases the request (no video any more)
+    m_settings.Save();
     return 0;
 }
 
@@ -163,7 +178,9 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         m_minimized = (wp == SIZE_MINIMIZED);
         if (m_initialized && !m_minimized)
         {
-            m_overlay.ReleaseTarget(); // it holds the back buffer, which ResizeBuffers needs freed
+            // Both hold views of the back buffer, which ResizeBuffers needs released.
+            m_overlay.ReleaseTarget();
+            m_outputPass.ReleaseTarget();
             if (m_gpu.Resize(LOWORD(lp), HIWORD(lp)))
                 m_renderer.OnResize();
             // Render immediately so live-resizing (modal size loop) stays responsive.
@@ -182,6 +199,11 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_ERASEBKGND:
         return 1;
+
+    case WM_EXITSIZEMOVE:   // window dragged (possibly to another monitor)
+    case WM_DISPLAYCHANGE:  // resolution / HDR toggled / monitor added or removed
+        UpdateOutputMode();
+        return 0;
 
     case WM_KEYDOWN:
         OnKeyDown(wp);
@@ -226,10 +248,11 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_CAPTURECHANGED:
         // Capture taken away (e.g. Alt+Tab) mid-drag: cancel without seeking.
-        if (reinterpret_cast<HWND>(lp) != m_hwnd && (m_draggingSeek || m_draggingVolume))
+        if (reinterpret_cast<HWND>(lp) != m_hwnd && (m_draggingSeek || m_draggingVolume || m_draggingTune >= 0))
         {
             m_draggingSeek = false;
             m_draggingVolume = false;
+            m_draggingTune = -1;
             m_seekPreview = -1.0;
             m_overlayDirty = true;
         }
@@ -267,6 +290,22 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
+    case kMsgAudioDeviceChanged:
+        // Default output changed: reopen audio there once the burst of notifications settles.
+        m_audioReopenPending = true;
+        SetTimer(m_hwnd, kTimerAudioReopen, kAudioReopenDelayMs, nullptr);
+        return 0;
+
+    case WM_TIMER:
+        if (wp == kTimerAudioReopen)
+        {
+            KillTimer(m_hwnd, kTimerAudioReopen);
+            m_audioReopenPending = false;
+            ReopenAudio("audio output changed");
+            return 0;
+        }
+        break;
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -277,6 +316,24 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 void App::OnKeyDown(WPARAM key)
 {
     const bool shift = GetKeyState(VK_SHIFT) < 0;
+    if (m_tuneOpen)
+    {
+        // While the tuning panel is open the arrows edit it (Shift = fine steps), Esc/T close it.
+        const unsigned values[3] = {m_settings.thdrContrast, m_settings.thdrSaturation, m_settings.thdrMiddleGray};
+        const int step = shift ? 1 : 5;
+        switch (key)
+        {
+        case VK_UP: m_tuneRow = (m_tuneRow + 2) % 3; m_overlayDirty = true; return;
+        case VK_DOWN: m_tuneRow = (m_tuneRow + 1) % 3; m_overlayDirty = true; return;
+        case VK_LEFT:
+            SetTuneValue(m_tuneRow, static_cast<unsigned>(std::max(0, static_cast<int>(values[m_tuneRow]) - step)));
+            return;
+        case VK_RIGHT: SetTuneValue(m_tuneRow, values[m_tuneRow] + static_cast<unsigned>(step)); return;
+        case VK_ESCAPE:
+        case 'T': ToggleTunePanel(); return;
+        default: break;
+        }
+    }
     switch (key)
     {
     case VK_SPACE: TogglePause(); break;
@@ -291,9 +348,26 @@ void App::OnKeyDown(WPARAM key)
     case VK_UP: ChangeVolume(kVolumeStep); break;
     case VK_DOWN: ChangeVolume(-kVolumeStep); break;
     case 'M': ToggleMute(); break;
+    case 'H': ToggleTrueHdr(); break;
+    case 'T': ToggleTunePanel(); break;
+    case 'A':
+        if (!m_audioMenu.empty())
+            SelectAudioTrack((m_audioChoice + 1) % static_cast<int>(m_audioMenu.size()));
+        break;
+    case 'S':
+        if (m_subMenu.size() > 1)
+            SelectSubtitleTrack((m_subChoice + 1) % static_cast<int>(m_subMenu.size()));
+        break;
     case VK_ESCAPE:
-        if (m_fullscreen)
+        if (m_openMenu != OverlayPart::None)
+        {
+            m_openMenu = OverlayPart::None;
+            m_overlayDirty = true;
+        }
+        else if (m_fullscreen)
+        {
             ToggleFullscreen();
+        }
         break;
     case 'O': ShowOpenDialog(); break;
     default: return;
@@ -323,6 +397,12 @@ void App::CloseVideo()
     // Release frames before the decoder so surfaces return to their pool first.
     m_audio.Close();
     m_hasAudio = false;
+    m_externalSubs.clear();
+    m_audioMenu.clear();
+    m_subMenu.clear();
+    m_audioChoice = -1;
+    m_subChoice = 0;
+    m_openMenu = OverlayPart::None;
     m_current = VideoFrame{};
     m_next = VideoFrame{};
     m_decoder.Close();
@@ -341,18 +421,23 @@ void App::OpenFile(const std::wstring& path)
         msg.append(error.begin(), error.end());
         MessageBoxW(m_hwnd, msg.c_str(), kAppName, MB_ICONERROR);
         m_dirty = true;
+        UpdateOutputMode();
         UpdateTitle(true);
         return;
     }
 
     const size_t slash = path.find_last_of(L"\\/");
     m_fileName = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    m_filePath = path;
+    m_externalSubs = LoadExternalSubtitles(path);
+    BuildTrackMenus(); // before decoding, so a default subtitle track sees packets from the start
 
     DecodeNext();
     if (!m_next)
     {
         MessageBoxW(m_hwnd, L"The file opened but no frames could be decoded on the GPU.", kAppName, MB_ICONERROR);
         CloseVideo();
+        UpdateOutputMode();
         UpdateTitle(true);
         return;
     }
@@ -362,6 +447,7 @@ void App::OpenFile(const std::wstring& path)
     m_hasVideo = true;
     m_paused = false;
     m_loggedMode = -1; // log the upscaler state again for the new file
+    UpdateOutputMode(); // HDR10 file on an HDR display -> HDR10 output
     m_hasAudio = m_audio.Open(path, m_current.pts, false, m_muted ? 0.0f : m_volume);
     AnchorClock(m_current.pts);
     m_dirty = true;
@@ -610,6 +696,61 @@ void App::SetQuality(int quality)
     ShowOsd(L"VSR quality %d (%ls)", m_quality, QualityName(m_quality));
 }
 
+void App::ToggleTrueHdr()
+{
+    m_trueHdrEnabled = !m_trueHdrEnabled;
+    UpdateOutputMode();
+    if (!m_trueHdrEnabled)
+        ShowOsd(L"RTX Video HDR: off");
+    else if (m_trueHdrOutput)
+        ShowOsd(L"RTX Video HDR: on");
+    else if (!m_renderer.SupportsTrueHdr())
+        ShowOsd(L"RTX Video HDR: not available");
+    else if (!m_display.hdr)
+        ShowOsd(L"RTX Video HDR: turn on Windows HDR");
+    else
+        ShowOsd(L"RTX Video HDR: on (applies to SDR videos)");
+}
+
+void App::ToggleTunePanel()
+{
+    if (!m_tuneOpen && !m_renderer.SupportsTrueHdr())
+    {
+        ShowOsd(L"RTX Video HDR not available");
+        return;
+    }
+    m_tuneOpen = !m_tuneOpen;
+    if (!m_tuneOpen)
+        m_settings.Save(); // persist when the panel closes (and on exit)
+    m_lastMouseMove = Now();
+    m_overlayDirty = true;
+}
+
+void App::SetTuneValue(int row, unsigned value)
+{
+    switch (row)
+    {
+    case 0: m_settings.thdrContrast = std::min(value, 200u); break;
+    case 1: m_settings.thdrSaturation = std::min(value, 200u); break;
+    default: m_settings.thdrMiddleGray = std::clamp(value, 10u, 100u); break;
+    }
+    m_tuneRow = std::clamp(row, 0, 2);
+    ApplyTrueHdrSettings();
+    if (m_trueHdrOutput)
+        m_dirty = true; // re-process the current frame with the new settings
+    m_overlayDirty = true;
+}
+
+void App::ApplyTrueHdrSettings()
+{
+    IUpscaler::SdrToHdrSettings s;
+    s.contrast = m_settings.thdrContrast;
+    s.saturation = m_settings.thdrSaturation;
+    s.middleGray = m_settings.thdrMiddleGray;
+    s.maxLuminance = m_thdrMaxLuminance;
+    m_renderer.SetSdrToHdrSettings(s);
+}
+
 void App::ApplyVolume()
 {
     m_audio.SetVolume(m_muted ? 0.0f : m_volume);
@@ -621,18 +762,117 @@ void App::ApplyVolume()
 
 void App::PresentFrame()
 {
-    m_renderer.CopyToBackBuffer();
-    if (m_overlay.IsAvailable())
-        m_overlay.Draw(BuildOverlayState());
+    if (m_outputMode != OutputMode::Sdr8)
+    {
+        // 10-bit / HDR10: the overlay is drawn offscreen and blended in by the output shader.
+        const bool overlayDrawn = m_overlay.IsAvailable() && m_overlay.Draw(BuildOverlayState());
+        OutputPass::Params params;
+        params.mode = m_outputMode == OutputMode::Hdr10 ? OutputPass::Mode::Hdr10
+                      : m_toneMap                       ? OutputPass::Mode::ToneMap
+                                                        : OutputPass::Mode::Sdr;
+        params.sdrWhiteNits = m_display.sdrWhiteNits;
+        params.srcPeakNits = m_contentPeakNits;
+        m_outputPass.Run(m_renderer.PresentSrv(), overlayDrawn ? m_overlay.OffscreenSrv() : nullptr, params);
+    }
+    else
+    {
+        m_renderer.CopyToBackBuffer();
+        if (m_overlay.IsAvailable())
+            m_overlay.Draw(BuildOverlayState());
+    }
     m_gpu.Present();
     m_overlayDirty = false;
+}
+
+void App::UpdateOutputMode()
+{
+    if (!m_initialized || m_deviceLost)
+        return;
+    m_display = QueryDisplayInfo(m_hwnd);
+
+    bool hdrContent = false;
+    bool tenBit = false;
+    if (m_hasVideo && m_current)
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        m_current.Texture()->GetDesc(&desc);
+        tenBit = desc.Format == DXGI_FORMAT_P010;
+        hdrContent = IsHdr10Frame(m_current.frame.get(), desc.Format);
+    }
+    m_contentIsHdr10 = hdrContent;
+    // RTX Video HDR: SDR video on an HDR display is converted to HDR10 after upscaling.
+    const bool trueHdr = m_trueHdrEnabled && m_hasVideo && m_current && !hdrContent && m_display.hdr &&
+                         m_renderer.SupportsTrueHdr() && m_outputPass.IsAvailable();
+    const DXGI_FORMAT sdrFormat = tenBit ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+    m_thdrMaxLuminance =
+        m_display.maxNits > 0.0f ? std::clamp(static_cast<unsigned>(m_display.maxNits), 400u, 2000u) : 1000u;
+    ApplyTrueHdrSettings();
+
+    OutputMode want = OutputMode::Sdr8;
+    if (m_outputPass.IsAvailable())
+    {
+        if ((hdrContent || trueHdr) && m_display.hdr)
+            want = OutputMode::Hdr10;
+        else if (tenBit)
+            want = OutputMode::Sdr10; // 10-bit SDR, and HDR10 files tone-mapped by OutputPass
+    }
+    // HDR10 files stay PQ through VSR; on an SDR output OutputPass tone-maps them (BT.2390).
+    const bool pqVideo = hdrContent && want != OutputMode::Sdr8;
+    if (hdrContent)
+        LogF("HDR10 video; display %ls: Windows HDR %s, peak %.0f nits, SDR white %.0f nits",
+             m_display.deviceName.c_str(), m_display.hdr ? "on" : "off", m_display.maxNits, m_display.sdrWhiteNits);
+    if (want == m_outputMode && trueHdr == m_trueHdrOutput && pqVideo == m_pqVideo &&
+        (!trueHdr || sdrFormat == m_sdrFormat))
+        return;
+
+    // Everything holding a view of the back buffer or the presentation texture lets go first.
+    m_overlay.ReleaseTarget();
+    m_outputPass.ReleaseTarget();
+    DXGI_HDR_METADATA_HDR10 metadata =
+        HdrMetadataFromFrame(want == OutputMode::Hdr10 && !trueHdr ? m_current.frame.get() : nullptr);
+    if (trueHdr)
+    {
+        // RTX Video HDR targets the display's peak: describe that to the display.
+        metadata.MaxMasteringLuminance = m_thdrMaxLuminance;
+        metadata.MaxContentLightLevel = static_cast<UINT16>(m_thdrMaxLuminance);
+    }
+    if (hdrContent)
+    {
+        // Tone-mapping source peak: MaxCLL, else the mastering display's peak, else 1000 nits.
+        const DXGI_HDR_METADATA_HDR10 content = HdrMetadataFromFrame(m_current.frame.get());
+        m_contentPeakNits = content.MaxContentLightLevel > 0 ? static_cast<float>(content.MaxContentLightLevel)
+                            : content.MaxMasteringLuminance > 0 ? static_cast<float>(content.MaxMasteringLuminance)
+                                                                : 1000.0f;
+        m_contentPeakNits = std::clamp(m_contentPeakNits, 100.0f, 10000.0f);
+    }
+    m_outputMode = m_gpu.SetOutputMode(want, &metadata);
+    m_trueHdrOutput = trueHdr && m_outputMode == OutputMode::Hdr10;
+    m_pqVideo = hdrContent && m_outputMode != OutputMode::Sdr8;
+    m_toneMap = m_pqVideo && m_outputMode == OutputMode::Sdr10;
+    m_sdrFormat = sdrFormat;
+    m_renderer.SetOutputMode(m_outputMode, m_trueHdrOutput, sdrFormat, m_pqVideo);
+    m_overlay.SetOffscreen(m_outputMode != OutputMode::Sdr8);
+    if (m_trueHdrOutput)
+        LogF("Output: HDR10 via RTX Video HDR (SDR %s source, max luminance %u nits)", tenBit ? "10-bit" : "8-bit",
+             m_thdrMaxLuminance);
+    else if (m_toneMap)
+        LogF("Output: SDR 10-bit, BT.2390 tone mapping (content peak %.0f nits -> 203 nits)", m_contentPeakNits);
+    else if (m_outputMode == OutputMode::Hdr10)
+        LogF("Output: HDR10 (mastering %u nits, MaxCLL %u, MaxFALL %u)", metadata.MaxMasteringLuminance,
+             metadata.MaxContentLightLevel, metadata.MaxFrameAverageLightLevel);
+    else if (m_outputMode == want)
+        LogF("Output: %s", OutputModeName(m_outputMode));
+    else
+        LogF("Output: %s (requested %s)", OutputModeName(m_outputMode), OutputModeName(want));
+    m_dirty = true;
 }
 
 bool App::BarWanted(double now) const
 {
     if (!m_hasVideo || !m_overlay.IsAvailable())
         return false;
-    if (m_paused || m_draggingSeek || m_draggingVolume)
+    if (m_paused || m_draggingSeek || m_draggingVolume || m_tuneOpen || m_draggingTune >= 0 ||
+        m_openMenu != OverlayPart::None)
         return true;
     // Stays up while the mouse moves or rests on the bar itself.
     return m_mouseInside && (now - m_lastMouseMove < kBarHideDelay || m_hover != OverlayPart::None);
@@ -694,6 +934,29 @@ OverlayState App::BuildOverlayState()
                       : m_mode == UpscaleMode::RtxVideoSdk ? L"RTX VSR"
                                                            : L"VSR (driver)";
     s.showQuality = m_mode == UpscaleMode::RtxVideoSdk;
+    // The RTX HDR chip only appears where it can do something: SDR video on an HDR display.
+    s.showTrueHdr = m_display.hdr && m_renderer.SupportsTrueHdr() && !m_contentIsHdr10;
+    s.trueHdrOn = m_trueHdrOutput && m_renderer.TrueHdrActive();
+    s.tuneOpen = m_tuneOpen;
+
+    if (const SubtitleTrack* track = CurrentSubtitleTrack())
+        s.subCount = track->Active(s.position, s.subs, OverlayState::kMaxSubs);
+    s.videoRect = m_renderer.LastDestRect();
+    s.videoW = m_decoder.Width();
+    s.videoH = m_decoder.Height();
+    s.showAudioButton = m_audioMenu.size() > 1;
+    s.showSubsButton = m_subMenu.size() > 1;
+    s.subsOn = m_subChoice > 0;
+    s.openMenu = m_openMenu;
+    s.menuItems = m_openMenu == OverlayPart::AudioButton  ? &m_audioMenu
+                  : m_openMenu == OverlayPart::SubsButton ? &m_subMenu
+                                                          : nullptr;
+    s.menuSelected = m_openMenu == OverlayPart::AudioButton ? m_audioChoice : m_subChoice;
+    s.menuHover = m_menuHover;
+    s.tuneRow = m_tuneRow;
+    s.tuneValues[0] = m_settings.thdrContrast;
+    s.tuneValues[1] = m_settings.thdrSaturation;
+    s.tuneValues[2] = m_settings.thdrMiddleGray;
     s.quality = m_quality;
     s.hover = m_hover;
     const float osd = OsdOpacity(now);
@@ -746,12 +1009,20 @@ void App::OnMouseMove(int x, int y)
         return;
 
     const double duration = m_decoder.Duration();
+    if (m_draggingTune >= 0)
+    {
+        const float f = m_overlay.TuneFraction(m_draggingTune, x);
+        SetTuneValue(m_draggingTune, m_draggingTune == 2 ? 10u + static_cast<unsigned>(std::lround(f * 90.0f))
+                                                         : static_cast<unsigned>(std::lround(f * 200.0f)));
+    }
     if (m_draggingSeek)
         m_seekPreview = m_overlay.SeekFraction(x) * duration;
     else if (m_draggingVolume)
         SetVolume(m_overlay.VolumeFraction(x));
 
-    m_hover = m_overlay.HitTest(x, y);
+    int item = -1;
+    m_hover = m_overlay.HitTest(x, y, &item);
+    m_menuHover = m_hover == OverlayPart::MenuItem ? item : -1;
     if (!m_draggingSeek)
         m_seekPreview = (m_hover == OverlayPart::Seek && duration > 0.0) ? m_overlay.SeekFraction(x) * duration : -1.0;
     m_overlayDirty = true;
@@ -762,9 +1033,49 @@ void App::OnMouseDown(int x, int y)
     if (!m_hasVideo)
         return;
     m_lastMouseMove = Now();
-    m_hover = m_overlay.HitTest(x, y);
+    int item = -1;
+    m_hover = m_overlay.HitTest(x, y, &item);
+    // An open track menu takes the click: pick an entry, or close it when clicking elsewhere.
+    if (m_openMenu != OverlayPart::None && m_hover != OverlayPart::Menu && m_hover != m_openMenu)
+    {
+        const OverlayPart menu = m_openMenu;
+        m_openMenu = OverlayPart::None;
+        m_overlayDirty = true;
+        if (m_hover == OverlayPart::MenuItem)
+        {
+            if (menu == OverlayPart::AudioButton)
+                SelectAudioTrack(item);
+            else
+                SelectSubtitleTrack(item);
+        }
+        return;
+    }
     switch (m_hover)
     {
+    case OverlayPart::AudioButton:
+    case OverlayPart::SubsButton: ToggleMenu(m_hover); break;
+    case OverlayPart::TuneContrast:
+    case OverlayPart::TuneSaturation:
+    case OverlayPart::TuneMiddleGray:
+    {
+        const int row = static_cast<int>(m_hover) - static_cast<int>(OverlayPart::TuneContrast);
+        SetCapture(m_hwnd);
+        m_draggingTune = row;
+        const float f = m_overlay.TuneFraction(row, x);
+        SetTuneValue(row, row == 2 ? 10u + static_cast<unsigned>(std::lround(f * 90.0f))
+                                   : static_cast<unsigned>(std::lround(f * 200.0f)));
+        break;
+    }
+    case OverlayPart::TuneReset:
+        m_settings.thdrContrast = 100;
+        m_settings.thdrSaturation = 100;
+        SetTuneValue(2, 50);
+        ShowOsd(L"RTX Video HDR: default tuning");
+        break;
+    case OverlayPart::None:
+        if (m_tuneOpen)
+            ToggleTunePanel(); // click on the video closes the panel
+        break;
     case OverlayPart::Seek:
         if (m_decoder.Duration() > 0.0)
         {
@@ -780,6 +1091,7 @@ void App::OnMouseDown(int x, int y)
         break;
     case OverlayPart::PlayPause: TogglePause(); break;
     case OverlayPart::Mute: ToggleMute(); break;
+    case OverlayPart::TrueHdr: ToggleTrueHdr(); break;
     case OverlayPart::Upscaler: CycleUpscaleMode(); break;
     case OverlayPart::Quality: SetQuality(m_quality % 4 + 1); break;
     case OverlayPart::Fullscreen: ToggleFullscreen(); break;
@@ -807,6 +1119,11 @@ void App::OnMouseUp()
         m_draggingVolume = false;
         ReleaseCapture();
     }
+    else if (m_draggingTune >= 0)
+    {
+        m_draggingTune = -1;
+        ReleaseCapture();
+    }
     m_overlayDirty = true;
 }
 
@@ -827,6 +1144,16 @@ bool App::HandleDeviceLost()
 {
     if (m_deviceLost || !m_gpu.CheckDeviceRemoved())
         return m_deviceLost;
+
+    // Rebuild everything on a new device, unless the last recovery was very recent
+    // (repeated resets point at a persistent problem: stop instead of looping).
+    const double now = Now();
+    if (now - m_lastDeviceRecovery > kMinSecondsBetweenRecoveries)
+    {
+        m_lastDeviceRecovery = now;
+        if (RecoverDevice())
+            return true; // this loop iteration is done; continue with the new device
+    }
     m_deviceLost = true;
     m_paused = true;
     m_audio.SetPaused(true);
@@ -836,6 +1163,182 @@ bool App::HandleDeviceLost()
                 L"The GPU driver reset the graphics device, so playback has stopped.\n\n"
                 L"Details are in %TEMP%\\DLSSVideoPlayer\\DLSSVideoPlayer.log. Please restart the player.",
                 kAppName, MB_ICONERROR);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Audio / subtitle tracks
+// ---------------------------------------------------------------------------
+
+void App::BuildTrackMenus()
+{
+    m_audioMenu.clear();
+    m_subMenu.clear();
+    m_audioChoice = -1;
+    m_subChoice = 0;
+    m_openMenu = OverlayPart::None;
+
+    const auto& audio = m_decoder.AudioStreams();
+    for (size_t i = 0; i < audio.size(); ++i)
+    {
+        m_audioMenu.push_back(audio[i].label);
+        if (audio[i].index == m_decoder.DefaultAudioStream())
+            m_audioChoice = static_cast<int>(i);
+    }
+
+    // Subtitles: Off, embedded tracks, external files. Default: a forced track, else one the
+    // file marks as default, else off.
+    m_subMenu.push_back(L"Off");
+    const auto& subs = m_decoder.SubtitleStreams();
+    int forced = -1, flagged = -1;
+    for (size_t i = 0; i < subs.size(); ++i)
+    {
+        m_subMenu.push_back(subs[i].label);
+        if (subs[i].isForced && forced < 0)
+            forced = static_cast<int>(i) + 1;
+        if (subs[i].isDefault && flagged < 0)
+            flagged = static_cast<int>(i) + 1;
+    }
+    for (const ExternalSubtitle& ext : m_externalSubs)
+        m_subMenu.push_back(L"External: " + ext.label);
+
+    const int initial = forced > 0 ? forced : flagged > 0 ? flagged : 0;
+    if (initial > 0)
+        SelectSubtitleTrack(initial, false); // at open: nothing decoded yet, no re-seek needed
+}
+
+void App::SelectAudioTrack(int choice)
+{
+    const auto& audio = m_decoder.AudioStreams();
+    if (choice < 0 || choice >= static_cast<int>(audio.size()) || m_filePath.empty())
+        return;
+    if (choice != m_audioChoice || !m_hasAudio)
+    {
+        const double pos = MediaTime();
+        AnchorClock(pos); // keep time flowing smoothly while the new track starts
+        m_hasAudio = m_audio.Open(m_filePath, pos, m_paused, m_muted ? 0.0f : m_volume, audio[choice].index);
+        m_audioChoice = choice;
+    }
+    ShowOsd(L"Audio: %ls", m_audioMenu[static_cast<size_t>(choice)].c_str());
+}
+
+void App::SelectSubtitleTrack(int choice, bool reseek)
+{
+    if (choice < 0 || choice >= static_cast<int>(m_subMenu.size()))
+        return;
+    m_subChoice = choice;
+    const auto& embedded = m_decoder.SubtitleStreams();
+    if (choice >= 1 && choice <= static_cast<int>(embedded.size()))
+    {
+        m_decoder.SelectSubtitleStream(embedded[static_cast<size_t>(choice - 1)].index);
+        // Re-read from the last keyframe so lines already on screen now are decoded too.
+        if (reseek && m_hasVideo && m_current)
+            SeekVideo(MediaTime());
+    }
+    else
+    {
+        m_decoder.SelectSubtitleStream(-1); // off, or an external file (fully loaded already)
+    }
+    m_dirty = true;
+    ShowOsd(choice == 0 ? L"Subtitles: off" : L"Subtitles: %ls", m_subMenu[static_cast<size_t>(choice)].c_str());
+}
+
+const SubtitleTrack* App::CurrentSubtitleTrack() const
+{
+    const int embeddedCount = static_cast<int>(m_decoder.SubtitleStreams().size());
+    if (m_subChoice >= 1 && m_subChoice <= embeddedCount)
+        return &m_decoder.Subtitles();
+    const int ext = m_subChoice - embeddedCount - 1;
+    if (m_subChoice > 0 && ext >= 0 && ext < static_cast<int>(m_externalSubs.size()))
+        return &m_externalSubs[static_cast<size_t>(ext)].track;
+    return nullptr;
+}
+
+void App::ToggleMenu(OverlayPart menu)
+{
+    m_openMenu = m_openMenu == menu ? OverlayPart::None : menu;
+    m_menuHover = -1;
+    m_overlayDirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Robustness
+// ---------------------------------------------------------------------------
+
+void App::ReopenAudio(const char* reason)
+{
+    if (!m_hasVideo || m_filePath.empty() || m_audioMenu.empty())
+        return;
+    const int stream = m_audioChoice >= 0 ? m_decoder.AudioStreams()[static_cast<size_t>(m_audioChoice)].index : -1;
+    const double pos = MediaTime();
+    AnchorClock(pos);
+    LogF("Audio: reopening (%s)", reason);
+    m_hasAudio = m_audio.Open(m_filePath, pos, m_paused, m_muted ? 0.0f : m_volume, stream);
+    ShowOsd(m_hasAudio ? L"Audio output changed" : L"No audio output available");
+}
+
+bool App::RecoverDevice()
+{
+    LogF("Recovering from GPU device loss: rebuilding the graphics pipeline");
+    const bool hadVideo = m_hasVideo;
+    const double pos = hadVideo ? MediaTime() : 0.0;
+    const int subChoice = m_subChoice;
+
+    // Release everything created on the old device: users first, the device last.
+    m_current = VideoFrame{};
+    m_next = VideoFrame{};
+    m_decoder.Close();
+    m_overlay = Overlay();
+    m_outputPass = OutputPass();
+    m_renderer = Renderer();
+    if (m_gpu.Context())
+    {
+        // Drop the context's references to the old swap chain now: only one flip-model swap
+        // chain may exist per window, and the new one is created next.
+        m_gpu.Context()->ClearState();
+        m_gpu.Context()->Flush();
+    }
+    m_gpu = GpuDevice();
+    m_outputMode = OutputMode::Sdr8;
+    m_trueHdrOutput = false;
+    m_pqVideo = false;
+    m_toneMap = false;
+
+    if (!m_gpu.Init(m_hwnd, m_options.d3dDebug) || !m_renderer.Init(&m_gpu, !m_options.noSdk))
+    {
+        LogF("Recovery failed: could not recreate the D3D11 device");
+        return false;
+    }
+    m_overlay.Init(&m_gpu, m_hwnd);
+    m_outputPass.Init(&m_gpu);
+    ApplyTrueHdrSettings();
+    if (!m_renderer.HasRtxVideoSdk() && m_mode == UpscaleMode::RtxVideoSdk)
+        m_mode = UpscaleMode::Off;
+
+    if (hadVideo)
+    {
+        // Audio keeps playing; the video catches up at the audio position.
+        std::string error;
+        if (!m_decoder.Open(m_filePath, m_gpu.Device(), error))
+        {
+            LogF("Recovery: could not reopen the video: %s", error.c_str());
+            CloseVideo();
+        }
+        else
+        {
+            m_eof = false;
+            const auto& embedded = m_decoder.SubtitleStreams();
+            if (subChoice >= 1 && subChoice <= static_cast<int>(embedded.size()))
+                m_decoder.SelectSubtitleStream(embedded[static_cast<size_t>(subChoice - 1)].index);
+            if (!SeekVideo(pos))
+                CloseVideo();
+        }
+    }
+    UpdateOutputMode();
+    m_dirty = true;
+    m_loggedMode = -1;
+    ShowOsd(L"Recovered from a graphics driver reset");
+    LogF("Recovery complete");
     return true;
 }
 
@@ -881,6 +1384,7 @@ void App::ToggleFullscreen()
         m_fullscreen = false;
     }
     m_dirty = true;
+    UpdateOutputMode(); // the window may now be on a different monitor
 }
 
 void App::UpdateTitle(bool force)
@@ -918,9 +1422,15 @@ void App::UpdateTitle(bool force)
             swprintf(audioText, ARRAYSIZE(audioText), L"Vol %d%%", static_cast<int>(std::lround(m_volume * 100.0f)));
 
         swprintf(title, ARRAYSIZE(title),
-                 L"%ls  |  %dx%d -> %ldx%ld  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls", m_fileName.c_str(),
-                 m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top, modeText, m_quality,
-                 audioText, pos, dur, m_paused ? L"  [Paused]" : L"", kAppName);
+                 L"%ls  |  %dx%d -> %ldx%ld%ls  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls",
+                 m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
+                 m_trueHdrOutput                     ? L"  RTX HDR"
+                 : m_toneMap                         ? L"  HDR\u2192SDR"
+                 : m_outputMode == OutputMode::Hdr10 ? L"  HDR10"
+                 : m_outputMode == OutputMode::Sdr10 ? L"  10-bit"
+                                                     : L"",
+                 modeText, m_quality, audioText, pos, dur,
+                 m_paused ? L"  [Paused]" : L"", kAppName);
     }
     SetWindowTextW(m_hwnd, title);
 }

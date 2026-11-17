@@ -26,10 +26,27 @@ bool Renderer::Init(GpuDevice* gpu, bool enableRtxSdk)
     return EnsurePresentTexture();
 }
 
+void Renderer::SetOutputMode(OutputMode mode, bool trueHdr, DXGI_FORMAT sdrFormat, bool pqVideo)
+{
+    m_mode = mode;
+    m_pqVideo = pqVideo && mode != OutputMode::Sdr8; // PQ needs the 10-bit presentation texture
+    m_trueHdr = trueHdr && mode == OutputMode::Hdr10;
+    m_trueHdrActive = false;
+    m_sdrFormat = sdrFormat;
+    m_sdkInput.Reset();
+    m_sdkOutput.Reset();
+    m_sdrScaled.Reset();
+    m_thdrOutput.Reset();
+    OnResize(); // recreates the presentation texture in the new format
+}
+
 void Renderer::OnResize()
 {
     m_present.Reset();
     m_presentRtv.Reset();
+    m_presentSrv.Reset();
+    m_sdrScaled.Reset();
+    m_thdrOutput.Reset();
     m_sdkOutput.Reset();
     EnsurePresentTexture();
 }
@@ -66,10 +83,11 @@ bool Renderer::EnsurePresentTexture()
 {
     if (m_present)
         return true;
-    if (!EnsureTexture(m_present, m_gpu->Width(), m_gpu->Height(), GpuDevice::kBackBufferFormat,
-                       D3D11_BIND_RENDER_TARGET))
+    if (!EnsureTexture(m_present, m_gpu->Width(), m_gpu->Height(), PresentFormat(),
+                       D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE))
         return false;
     m_gpu->Device()->CreateRenderTargetView(m_present.Get(), nullptr, &m_presentRtv);
+    m_gpu->Device()->CreateShaderResourceView(m_present.Get(), nullptr, &m_presentSrv);
     RenderBlack();
     return true;
 }
@@ -111,34 +129,79 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
     if (!upscaling)
         mode = UpscaleMode::Off;
 
+    // RTX Video HDR: SDR source on an HDR10 output. VSR (if any) runs on the SDR image first,
+    // TrueHDR last, as in NVIDIA's samples.
+    const bool trueHdr = m_trueHdr && IsHdr() && m_sdk && m_sdk->SupportsSdrToHdr();
+    const DXGI_FORMAT stageFormat = trueHdr ? m_sdrFormat : PresentFormat();
+    const bool vpHdr = m_pqVideo && !trueHdr; // the video processor writes PQ only for HDR10 sources
+    const RECT outRect{0, 0, destW, destH};
+    ID3D11Texture2D* scaled = nullptr; // dest-sized result; null when the VP wrote straight into m_present
+    effectiveMode = UpscaleMode::Off;
+
     if (mode == UpscaleMode::RtxVideoSdk)
     {
-        if (m_sdk && m_sdk->OutputFormat() == GpuDevice::kBackBufferFormat &&
-            EnsureTexture(m_sdkInput, f->width, f->height, m_sdk->InputFormat(), m_sdk->InputBindFlags()) &&
-            EnsureTexture(m_sdkOutput, destW, destH, m_sdk->OutputFormat(), m_sdk->OutputBindFlags()))
+        // 1) YUV -> RGB at source resolution, 2) SDK upscale (3) placed into the letterboxed frame below).
+        if (m_sdk && m_sdk->SupportsFormat(stageFormat) &&
+            EnsureTexture(m_sdkInput, f->width, f->height, stageFormat, m_sdk->InputBindFlags()) &&
+            EnsureTexture(m_sdkOutput, destW, destH, stageFormat, m_sdk->OutputBindFlags()) &&
+            m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdkInput.Get(), srcRect, false, vpHdr) &&
+            m_sdk->Upscale(m_sdkInput.Get(), srcRect, m_sdkOutput.Get(), outRect, quality))
         {
-            // 1) YUV -> RGB at source resolution, 2) SDK upscale, 3) place into letterboxed frame.
-            const RECT outRect{0, 0, destW, destH};
-            if (m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdkInput.Get(), srcRect, false) &&
-                m_sdk->Upscale(m_sdkInput.Get(), srcRect, m_sdkOutput.Get(), outRect, quality))
-            {
-                RenderBlack();
-                m_gpu->Context()->CopySubresourceRegion(m_present.Get(), 0, m_destRect.left, m_destRect.top, 0,
-                                                        m_sdkOutput.Get(), 0, nullptr);
-                effectiveMode = UpscaleMode::RtxVideoSdk;
-                return true;
-            }
+            scaled = m_sdkOutput.Get();
+            effectiveMode = UpscaleMode::RtxVideoSdk;
         }
-        // SDK unavailable or failed: fall back to plain scaling, NOT driver VSR. On the
-        // RTX 4090 test machine driver VSR fails every frame ("NVWGF2UM: Failed to run
-        // Algo 2") while the SDK is alive, ending in DXGI_ERROR_DRIVER_INTERNAL_ERROR.
-        mode = UpscaleMode::Off;
+        else
+        {
+            // SDK unavailable or failed: fall back to plain scaling, NOT driver VSR. On the
+            // RTX 4090 test machine driver VSR fails every frame ("NVWGF2UM: Failed to run
+            // Algo 2") while the SDK is alive, ending in DXGI_ERROR_DRIVER_INTERNAL_ERROR.
+            mode = UpscaleMode::Off;
+        }
     }
 
-    const bool vsr = mode == UpscaleMode::DriverVsr;
-    if (!m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, vsr))
-        return false;
-    effectiveMode = (vsr && m_vp.NvidiaVsrAccepted()) ? UpscaleMode::DriverVsr : UpscaleMode::Off;
+    if (!scaled)
+    {
+        const bool vsr = mode == UpscaleMode::DriverVsr;
+        if (trueHdr)
+        {
+            if (!EnsureTexture(m_sdrScaled, destW, destH, stageFormat, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE) ||
+                !m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_sdrScaled.Get(), outRect, vsr, false))
+                return false;
+            scaled = m_sdrScaled.Get();
+        }
+        else if (!m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, vsr, vpHdr))
+        {
+            return false;
+        }
+        effectiveMode = (vsr && m_vp.NvidiaVsrAccepted()) ? UpscaleMode::DriverVsr : UpscaleMode::Off;
+    }
+
+    m_trueHdrActive = false;
+    if (trueHdr)
+    {
+        if (EnsureTexture(m_thdrOutput, destW, destH, PresentFormat(),
+                          D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS) &&
+            m_sdk->SdrToHdr(scaled, outRect, m_thdrOutput.Get(), outRect, m_thdrSettings))
+        {
+            scaled = m_thdrOutput.Get();
+            m_trueHdrActive = true;
+        }
+        else
+        {
+            // TrueHDR failed: let the video processor map the SDR frame into the HDR10 output
+            // instead (no AI expansion, but correct colors).
+            effectiveMode = UpscaleMode::Off;
+            return m_vp.Blit(vf.Texture(), vf.ArraySlice(), srcRect, f, m_present.Get(), m_destRect, false, true);
+        }
+    }
+
+    if (scaled)
+    {
+        // Place the dest-sized result into the letterboxed presentation texture.
+        RenderBlack();
+        m_gpu->Context()->CopySubresourceRegion(m_present.Get(), 0, m_destRect.left, m_destRect.top, 0, scaled, 0,
+                                                nullptr);
+    }
     return true;
 }
 
