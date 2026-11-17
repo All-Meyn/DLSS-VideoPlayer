@@ -31,7 +31,7 @@ ComPtr<IDXGIAdapter1> PickAdapter(IDXGIFactory1* factory, bool& isNvidia)
 }
 } // namespace
 
-bool GpuDevice::Init(HWND hwnd)
+bool GpuDevice::Init(HWND hwnd, bool debugLayer)
 {
     ComPtr<IDXGIFactory2> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
@@ -51,22 +51,27 @@ bool GpuDevice::Init(HWND hwnd)
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 #ifdef _DEBUG
-    flags |= D3D11_CREATE_DEVICE_DEBUG;
+    debugLayer = true;
 #endif
+    if (debugLayer)
+        flags |= D3D11_CREATE_DEVICE_DEBUG;
 
     HRESULT hr = D3D11CreateDevice(adapter.Get(), adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
                                    nullptr, flags, levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &m_device,
                                    nullptr, &m_context);
-#ifdef _DEBUG
-    if (FAILED(hr))
+    if (FAILED(hr) && debugLayer)
     {
         // Debug layer not installed (Graphics Tools optional feature) - retry without it.
+        LogF("D3D11 debug layer unavailable (install the 'Graphics Tools' optional feature); continuing without it");
         flags &= ~D3D11_CREATE_DEVICE_DEBUG;
         hr = D3D11CreateDevice(adapter.Get(), adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
                                nullptr, flags, levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &m_device, nullptr,
                                &m_context);
     }
-#endif
+    else if (debugLayer)
+    {
+        LogF("D3D11 debug layer enabled (messages go to the debugger output / DebugView)");
+    }
     if (FAILED(hr))
     {
         LogF("D3D11CreateDevice failed: 0x%08lx", hr);
@@ -150,4 +155,27 @@ void GpuDevice::Present()
 {
     // VSync on: paces the render loop to the display refresh rate.
     m_swapChain->Present(1, 0);
+}
+
+bool GpuDevice::CheckDeviceRemoved()
+{
+    if (m_deviceRemoved)
+        return true;
+    const HRESULT reason = m_device->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason))
+        return false;
+
+    m_deviceRemoved = true;
+    const char* name = "unknown";
+    switch (reason)
+    {
+    case DXGI_ERROR_DEVICE_HUNG: name = "DEVICE_HUNG (GPU took too long / hung)"; break;
+    case DXGI_ERROR_DEVICE_REMOVED: name = "DEVICE_REMOVED"; break;
+    case DXGI_ERROR_DEVICE_RESET: name = "DEVICE_RESET (bad commands sent to the GPU)"; break;
+    case DXGI_ERROR_DRIVER_INTERNAL_ERROR: name = "DRIVER_INTERNAL_ERROR"; break;
+    case DXGI_ERROR_INVALID_CALL: name = "INVALID_CALL"; break;
+    default: break;
+    }
+    LogF("GPU device removed! Reason: 0x%08lx %s", static_cast<unsigned long>(reason), name);
+    return true;
 }

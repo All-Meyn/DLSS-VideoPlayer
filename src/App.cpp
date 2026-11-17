@@ -3,9 +3,12 @@
 #include "Log.h"
 
 #include <commdlg.h>
+#include <windowsx.h>
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstdarg>
+#include <cmath>
 #include <cwchar>
 
 namespace
@@ -17,6 +20,23 @@ constexpr double kSeekStepLarge = 30.0;
 constexpr int kMaxCatchUpFrames = 8;
 constexpr int kMaxSeekDecodeFrames = 1000;
 constexpr double kTitleUpdateInterval = 0.25;
+constexpr double kResyncThreshold = 1.0; // video this far behind the audio clock: skip ahead
+constexpr float kVolumeStep = 0.05f;
+constexpr double kBarHideDelay = 2.5; // seconds without mouse movement before the bar hides
+constexpr double kBarFadeTime = 0.15;
+constexpr double kOsdDuration = 1.2;
+constexpr double kOsdFadeTime = 0.3;
+
+const wchar_t* QualityName(int q)
+{
+    switch (q)
+    {
+    case 1: return L"Low";
+    case 2: return L"Medium";
+    case 3: return L"High";
+    default: return L"Ultra";
+    }
+}
 
 void FormatTime(double s, wchar_t* out, size_t n)
 {
@@ -27,7 +47,7 @@ void FormatTime(double s, wchar_t* out, size_t n)
 }
 } // namespace
 
-int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
+int App::Run(HINSTANCE instance, int showCmd, const Options& options)
 {
     LARGE_INTEGER freq{};
     QueryPerformanceFrequency(&freq);
@@ -45,14 +65,20 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
     m_hwnd = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
                              nullptr, nullptr, instance, this);
     if (!m_hwnd)
+    {
+        wchar_t msg[128];
+        swprintf(msg, ARRAYSIZE(msg), L"Could not create the main window (error %lu).", GetLastError());
+        MessageBoxW(nullptr, msg, kAppName, MB_ICONERROR);
         return 1;
+    }
 
-    if (!m_gpu.Init(m_hwnd) || !m_renderer.Init(&m_gpu))
+    if (!m_gpu.Init(m_hwnd, options.d3dDebug) || !m_renderer.Init(&m_gpu, !options.noSdk))
     {
         MessageBoxW(m_hwnd, L"Failed to initialize Direct3D 11 with video support.", kAppName, MB_ICONERROR);
         return 1;
     }
     m_initialized = true;
+    m_overlay.Init(&m_gpu, m_hwnd); // optional: without it the player is keyboard-only
     if (m_renderer.HasRtxVideoSdk())
         m_mode = UpscaleMode::RtxVideoSdk; // prefer the SDK when it initialized
 
@@ -61,8 +87,8 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
 
     if (!m_gpu.IsNvidia())
         LogF("Warning: no NVIDIA GPU selected; RTX Video Super Resolution will be unavailable.");
-    if (!initialFile.empty())
-        OpenFile(initialFile);
+    if (!options.initialFile.empty())
+        OpenFile(options.initialFile);
     UpdateTitle(true);
 
     bool running = true;
@@ -79,26 +105,32 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
         if (!running)
             break;
 
-        if (m_minimized)
+        if (m_minimized || m_deviceLost)
         {
+            UpdateKeepAwake(); // releases it after a device loss
             WaitMessage();
             continue;
         }
 
         const bool playing = m_hasVideo && !m_paused;
         const bool frameChanged = playing && AdvancePlayback();
+        UpdateOverlay();
 
         if (frameChanged || m_dirty)
             RenderNow(); // re-process (upscale) + present
-        else if (playing)
-            m_renderer.Present(); // same frame, keeps vsync pacing
+        else if (playing || m_overlayDirty || OverlayAnimating())
+            PresentFrame(); // same video frame (vsync pacing / overlay update)
         else
             WaitMessage(); // paused / idle: sleep until input
 
+        if (HandleDeviceLost())
+            continue;
+        UpdateKeepAwake();
         UpdateTitle(false);
     }
 
     CloseVideo();
+    UpdateKeepAwake(); // releases the request (no video any more)
     return 0;
 }
 
@@ -111,7 +143,11 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_NCCREATE)
     {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        auto* creating = static_cast<App*>(cs->lpCreateParams);
+        // Store the handle now: CreateWindowExW hasn't returned yet, and HandleMessage
+        // passes m_hwnd to DefWindowProcW (a null hwnd there makes window creation fail).
+        creating->m_hwnd = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(creating));
     }
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (app)
@@ -127,6 +163,7 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         m_minimized = (wp == SIZE_MINIMIZED);
         if (m_initialized && !m_minimized)
         {
+            m_overlay.ReleaseTarget(); // it holds the back buffer, which ResizeBuffers needs freed
             if (m_gpu.Resize(LOWORD(lp), HIWORD(lp)))
                 m_renderer.OnResize();
             // Render immediately so live-resizing (modal size loop) stays responsive.
@@ -159,8 +196,66 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_LBUTTONDBLCLK:
-        ToggleFullscreen();
+        // Double-click on the video toggles fullscreen; on the control bar it's just a click.
+        if (m_overlay.HitTest(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)) == OverlayPart::None)
+            ToggleFullscreen();
+        else
+            OnMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
+
+    case WM_MOUSEMOVE:
+        OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+
+    case WM_MOUSELEAVE:
+        m_trackingMouse = false;
+        m_mouseInside = false;
+        m_hover = OverlayPart::None;
+        if (!m_draggingSeek)
+            m_seekPreview = -1.0;
+        m_overlayDirty = true;
+        return 0;
+
+    case WM_LBUTTONDOWN:
+        OnMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+
+    case WM_LBUTTONUP:
+        OnMouseUp();
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        // Capture taken away (e.g. Alt+Tab) mid-drag: cancel without seeking.
+        if (reinterpret_cast<HWND>(lp) != m_hwnd && (m_draggingSeek || m_draggingVolume))
+        {
+            m_draggingSeek = false;
+            m_draggingVolume = false;
+            m_seekPreview = -1.0;
+            m_overlayDirty = true;
+        }
+        return 0;
+
+    case WM_MOUSEWHEEL:
+        ChangeVolume(kVolumeStep * static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA);
+        return 0;
+
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && m_cursorHidden)
+        {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        break;
+
+    case WM_DPICHANGED:
+    {
+        const RECT* r = reinterpret_cast<const RECT*>(lp);
+        m_overlay.OnDpiChanged();
+        SetWindowPos(m_hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        m_overlayDirty = true;
+        return 0;
+    }
 
     case WM_DROPFILES:
     {
@@ -191,11 +286,11 @@ void App::OnKeyDown(WPARAM key)
     case '1':
     case '2':
     case '3':
-    case '4':
-        m_quality = static_cast<int>(key - '0');
-        m_dirty = true;
-        break;
+    case '4': SetQuality(static_cast<int>(key - '0')); break;
     case 'F': ToggleFullscreen(); break;
+    case VK_UP: ChangeVolume(kVolumeStep); break;
+    case VK_DOWN: ChangeVolume(-kVolumeStep); break;
+    case 'M': ToggleMute(); break;
     case VK_ESCAPE:
         if (m_fullscreen)
             ToggleFullscreen();
@@ -226,6 +321,8 @@ void App::ShowOpenDialog()
 void App::CloseVideo()
 {
     // Release frames before the decoder so surfaces return to their pool first.
+    m_audio.Close();
+    m_hasAudio = false;
     m_current = VideoFrame{};
     m_next = VideoFrame{};
     m_decoder.Close();
@@ -264,6 +361,8 @@ void App::OpenFile(const std::wstring& path)
 
     m_hasVideo = true;
     m_paused = false;
+    m_loggedMode = -1; // log the upscaler state again for the new file
+    m_hasAudio = m_audio.Open(path, m_current.pts, false, m_muted ? 0.0f : m_volume);
     AnchorClock(m_current.pts);
     m_dirty = true;
     UpdateTitle(true);
@@ -280,9 +379,19 @@ double App::Now() const
     return static_cast<double>(t.QuadPart) * m_qpcToSeconds;
 }
 
-double App::MediaTime() const
+double App::MediaTime()
 {
-    return m_paused ? m_anchorMedia : m_anchorMedia + (Now() - m_anchorTime);
+    if (m_paused)
+        return m_anchorMedia;
+    // Audio is the master clock. While it can't provide one (just after open/seek, after the
+    // audio stream ended, or device lost) the QPC clock continues from the last audio time.
+    double audioClock = 0.0;
+    if (m_hasAudio && m_audio.GetClock(audioClock))
+    {
+        AnchorClock(audioClock);
+        return audioClock;
+    }
+    return m_anchorMedia + (Now() - m_anchorTime);
 }
 
 void App::AnchorClock(double mediaTime)
@@ -320,15 +429,30 @@ bool App::AdvancePlayback()
         ++steps;
     }
 
-    // Too far behind (slow decode / system stall): resync the clock rather than spiral.
     if (m_next && m_next.pts <= t && steps == kMaxCatchUpFrames)
-        AnchorClock(m_current.pts);
+    {
+        if (!m_hasAudio)
+        {
+            // No audio: resync the clock to the video rather than spiral.
+            AnchorClock(m_current.pts);
+        }
+        else if (t - m_next.pts > kResyncThreshold)
+        {
+            // The audio clock can't wait for video (e.g. after the window was minimized):
+            // skip the video ahead to the audio position instead of decoding every frame.
+            LogF("Video %.2fs behind audio; skipping ahead to %.2fs", t - m_next.pts, t);
+            if (!SeekVideo(t))
+                return true;
+            changed = true;
+        }
+    }
 
     if (!m_next && m_eof)
     {
         // End of stream: hold the last frame.
         m_anchorMedia = m_current.pts;
         m_paused = true;
+        m_audio.SetPaused(true);
         UpdateTitle(true);
     }
     return changed;
@@ -348,18 +472,24 @@ void App::TogglePause()
         }
         m_paused = false;
         AnchorClock(m_anchorMedia);
+        m_audio.SetPaused(false);
     }
     else
     {
         m_anchorMedia = MediaTime();
         m_paused = true;
+        m_audio.SetPaused(true);
     }
+    ShowOsd(m_paused ? L"Paused" : L"Playing");
 }
 
 void App::SeekBy(double delta)
 {
     if (m_hasVideo)
+    {
         SeekTo(MediaTime() + delta);
+        ShowSeekOsd();
+    }
 }
 
 void App::SeekTo(double target)
@@ -368,14 +498,25 @@ void App::SeekTo(double target)
         return;
     const double duration = m_decoder.Duration();
     target = std::max(0.0, duration > 0.0 ? std::min(target, duration - 0.1) : target);
+    if (!SeekVideo(target))
+        return;
 
+    // Seeking keeps the current paused/playing state. Audio restarts exactly where the
+    // video landed (the first frame at or after the target).
+    AnchorClock(m_current.pts);
+    if (m_hasAudio)
+        m_audio.Seek(m_current.pts);
+}
+
+bool App::SeekVideo(double target)
+{
     m_current = VideoFrame{};
     m_next = VideoFrame{};
     m_eof = false;
     if (!m_decoder.Seek(target))
     {
         m_eof = true;
-        return;
+        return false;
     }
 
     // Decode forward from the keyframe until we reach the target.
@@ -395,25 +536,23 @@ void App::SeekTo(double target)
     {
         CloseVideo();
         m_dirty = true;
-        return;
+        return false;
     }
-
-    // Seeking keeps the current paused/playing state.
-    AnchorClock(m_current.pts);
     m_dirty = true;
+    return true;
 }
 
 void App::CycleUpscaleMode()
 {
-    switch (m_mode)
-    {
-    case UpscaleMode::Off: m_mode = UpscaleMode::DriverVsr; break;
-    case UpscaleMode::DriverVsr:
-        m_mode = m_renderer.HasRtxVideoSdk() ? UpscaleMode::RtxVideoSdk : UpscaleMode::Off;
-        break;
-    case UpscaleMode::RtxVideoSdk: m_mode = UpscaleMode::Off; break;
-    }
+    // With the SDK active the cycle is Off <-> RTX Video SDK: driver VSR is left out
+    // because it crashes the device when used alongside the SDK (see Renderer.cpp).
+    // Without the SDK (not built, failed to start, or --no-sdk): Off <-> driver VSR.
+    if (m_mode != UpscaleMode::Off)
+        m_mode = UpscaleMode::Off;
+    else
+        m_mode = m_renderer.HasRtxVideoSdk() ? UpscaleMode::RtxVideoSdk : UpscaleMode::DriverVsr;
     m_dirty = true;
+    ShowOsd(L"Upscaler: %hs", UpscaleModeName(m_mode));
 }
 
 // ---------------------------------------------------------------------------
@@ -422,19 +561,300 @@ void App::CycleUpscaleMode()
 
 void App::RenderNow()
 {
-    if (!m_initialized)
+    if (!m_initialized || m_deviceLost)
         return;
     if (m_hasVideo && m_current)
     {
         if (!m_renderer.RenderFrame(m_current, m_decoder.SampleAspectRatio(), m_mode, m_quality, m_effectiveMode))
             m_renderer.RenderBlack();
+        LogUpscalerStateIfChanged();
     }
     else
     {
         m_renderer.RenderBlack();
     }
-    m_renderer.Present();
+    PresentFrame();
     m_dirty = false;
+}
+
+void App::ChangeVolume(float delta)
+{
+    SetVolume(m_volume + delta);
+}
+
+void App::SetVolume(float volume)
+{
+    m_volume = std::clamp(volume, 0.0f, 1.0f);
+    m_muted = false;
+    ApplyVolume();
+    if (m_hasAudio)
+        ShowOsd(L"Volume %d%%", static_cast<int>(std::lround(m_volume * 100.0f)));
+    else
+        ShowOsd(L"No audio track");
+}
+
+void App::ToggleMute()
+{
+    m_muted = !m_muted;
+    ApplyVolume();
+    if (m_muted)
+        ShowOsd(L"Muted");
+    else
+        ShowOsd(L"Volume %d%%", static_cast<int>(std::lround(m_volume * 100.0f)));
+}
+
+void App::SetQuality(int quality)
+{
+    m_quality = std::clamp(quality, 1, 4);
+    m_dirty = true;
+    ShowOsd(L"VSR quality %d (%ls)", m_quality, QualityName(m_quality));
+}
+
+void App::ApplyVolume()
+{
+    m_audio.SetVolume(m_muted ? 0.0f : m_volume);
+}
+
+// ---------------------------------------------------------------------------
+// On-screen controls
+// ---------------------------------------------------------------------------
+
+void App::PresentFrame()
+{
+    m_renderer.CopyToBackBuffer();
+    if (m_overlay.IsAvailable())
+        m_overlay.Draw(BuildOverlayState());
+    m_gpu.Present();
+    m_overlayDirty = false;
+}
+
+bool App::BarWanted(double now) const
+{
+    if (!m_hasVideo || !m_overlay.IsAvailable())
+        return false;
+    if (m_paused || m_draggingSeek || m_draggingVolume)
+        return true;
+    // Stays up while the mouse moves or rests on the bar itself.
+    return m_mouseInside && (now - m_lastMouseMove < kBarHideDelay || m_hover != OverlayPart::None);
+}
+
+float App::OsdOpacity(double now) const
+{
+    return static_cast<float>(std::clamp((m_osdUntil - now) / kOsdFadeTime, 0.0, 1.0));
+}
+
+bool App::OverlayAnimating() const
+{
+    const double now = Now();
+    const float target = BarWanted(now) ? 1.0f : 0.0f;
+    return m_barOpacity != target || OsdOpacity(now) > 0.0f;
+}
+
+void App::UpdateOverlay()
+{
+    const double now = Now();
+    const double dt = std::min(now - m_lastOverlayUpdate, 0.1);
+    m_lastOverlayUpdate = now;
+
+    const bool want = BarWanted(now);
+    const float step = static_cast<float>(dt / kBarFadeTime);
+    m_barOpacity = want ? std::min(1.0f, m_barOpacity + step) : std::max(0.0f, m_barOpacity - step);
+
+    // In fullscreen the cursor disappears together with the bar.
+    const bool hideCursor = m_fullscreen && m_hasVideo && m_mouseInside && !want;
+    if (hideCursor != m_cursorHidden)
+    {
+        m_cursorHidden = hideCursor;
+        SetCursor(hideCursor ? nullptr : LoadCursor(nullptr, IDC_ARROW));
+    }
+}
+
+OverlayState App::BuildOverlayState()
+{
+    OverlayState s;
+    if (!m_hasVideo)
+    {
+        s.osdText = L"Drop a video here or press O to open";
+        s.osdOpacity = 1.0f;
+        return s;
+    }
+    const double now = Now();
+    s.barOpacity = m_barOpacity;
+    s.paused = m_paused;
+    s.hasAudio = m_hasAudio;
+    s.muted = m_muted;
+    s.fullscreen = m_fullscreen;
+    s.position = MediaTime();
+    s.duration = m_decoder.Duration();
+    s.seekPreview = m_seekPreview;
+    s.draggingSeek = m_draggingSeek;
+    s.volume = m_volume;
+    s.upscalerOn = m_mode != UpscaleMode::Off;
+    s.upscalerLabel = m_mode == UpscaleMode::Off           ? L"VSR off"
+                      : m_mode == UpscaleMode::RtxVideoSdk ? L"RTX VSR"
+                                                           : L"VSR (driver)";
+    s.showQuality = m_mode == UpscaleMode::RtxVideoSdk;
+    s.quality = m_quality;
+    s.hover = m_hover;
+    const float osd = OsdOpacity(now);
+    if (osd > 0.0f)
+    {
+        s.osdText = m_osdText;
+        s.osdOpacity = osd;
+    }
+    return s;
+}
+
+void App::ShowOsd(const wchar_t* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    vswprintf(m_osdText, ARRAYSIZE(m_osdText), format, args);
+    va_end(args);
+    m_osdUntil = Now() + kOsdDuration;
+    m_overlayDirty = true;
+}
+
+void App::ShowSeekOsd()
+{
+    if (!m_hasVideo)
+        return;
+    wchar_t pos[32], dur[32];
+    FormatTime(MediaTime(), pos, ARRAYSIZE(pos));
+    FormatTime(m_decoder.Duration(), dur, ARRAYSIZE(dur));
+    ShowOsd(L"%ls / %ls", pos, dur);
+}
+
+void App::OnMouseMove(int x, int y)
+{
+    if (!m_trackingMouse)
+    {
+        TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_hwnd, 0};
+        TrackMouseEvent(&tme);
+        m_trackingMouse = true;
+    }
+    m_mouseInside = true;
+    // Windows also sends WM_MOUSEMOVE without movement (e.g. on resize); only real
+    // movement should keep the bar visible.
+    if (x != m_mouseX || y != m_mouseY)
+    {
+        m_mouseX = x;
+        m_mouseY = y;
+        m_lastMouseMove = Now();
+    }
+    if (!m_hasVideo)
+        return;
+
+    const double duration = m_decoder.Duration();
+    if (m_draggingSeek)
+        m_seekPreview = m_overlay.SeekFraction(x) * duration;
+    else if (m_draggingVolume)
+        SetVolume(m_overlay.VolumeFraction(x));
+
+    m_hover = m_overlay.HitTest(x, y);
+    if (!m_draggingSeek)
+        m_seekPreview = (m_hover == OverlayPart::Seek && duration > 0.0) ? m_overlay.SeekFraction(x) * duration : -1.0;
+    m_overlayDirty = true;
+}
+
+void App::OnMouseDown(int x, int y)
+{
+    if (!m_hasVideo)
+        return;
+    m_lastMouseMove = Now();
+    m_hover = m_overlay.HitTest(x, y);
+    switch (m_hover)
+    {
+    case OverlayPart::Seek:
+        if (m_decoder.Duration() > 0.0)
+        {
+            SetCapture(m_hwnd);
+            m_draggingSeek = true;
+            m_seekPreview = m_overlay.SeekFraction(x) * m_decoder.Duration();
+        }
+        break;
+    case OverlayPart::Volume:
+        SetCapture(m_hwnd);
+        m_draggingVolume = true;
+        SetVolume(m_overlay.VolumeFraction(x));
+        break;
+    case OverlayPart::PlayPause: TogglePause(); break;
+    case OverlayPart::Mute: ToggleMute(); break;
+    case OverlayPart::Upscaler: CycleUpscaleMode(); break;
+    case OverlayPart::Quality: SetQuality(m_quality % 4 + 1); break;
+    case OverlayPart::Fullscreen: ToggleFullscreen(); break;
+    default: break;
+    }
+    m_overlayDirty = true;
+}
+
+void App::OnMouseUp()
+{
+    if (m_draggingSeek)
+    {
+        const double target = m_seekPreview;
+        m_draggingSeek = false; // before ReleaseCapture (WM_CAPTURECHANGED)
+        m_seekPreview = -1.0;
+        ReleaseCapture();
+        if (target >= 0.0)
+        {
+            SeekTo(target);
+            ShowSeekOsd();
+        }
+    }
+    else if (m_draggingVolume)
+    {
+        m_draggingVolume = false;
+        ReleaseCapture();
+    }
+    m_overlayDirty = true;
+}
+
+// While a video is playing, keep the display on and the PC awake; release when paused,
+// stopped, at the end of the file or after a device loss. Only calls Windows on a change.
+void App::UpdateKeepAwake()
+{
+    const bool want = m_hasVideo && !m_paused && !m_deviceLost;
+    if (want == m_keepAwake)
+        return;
+    m_keepAwake = want;
+    SetThreadExecutionState(want ? (ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) : ES_CONTINUOUS);
+}
+
+// Stops rendering (instead of failing every frame) once the driver has removed the device.
+// Recovering would mean recreating the device, decoder and upscalers; for now: restart.
+bool App::HandleDeviceLost()
+{
+    if (m_deviceLost || !m_gpu.CheckDeviceRemoved())
+        return m_deviceLost;
+    m_deviceLost = true;
+    m_paused = true;
+    m_audio.SetPaused(true);
+    LogF("Rendering stopped after device removal (last upscaler: requested %s, using %s)", UpscaleModeName(m_mode),
+         UpscaleModeName(m_effectiveMode));
+    MessageBoxW(m_hwnd,
+                L"The GPU driver reset the graphics device, so playback has stopped.\n\n"
+                L"Details are in %TEMP%\\DLSSVideoPlayer\\DLSSVideoPlayer.log. Please restart the player.",
+                kAppName, MB_ICONERROR);
+    return true;
+}
+
+// Logs only when the requested mode, the mode actually used, or the quality changes,
+// so it is cheap to call every rendered frame.
+void App::LogUpscalerStateIfChanged()
+{
+    const int mode = static_cast<int>(m_mode);
+    const int effective = static_cast<int>(m_effectiveMode);
+    if (mode == m_loggedMode && effective == m_loggedEffectiveMode && m_quality == m_loggedQuality)
+        return;
+    m_loggedMode = mode;
+    m_loggedEffectiveMode = effective;
+    m_loggedQuality = m_quality;
+
+    const RECT d = m_renderer.LastDestRect();
+    LogF("Upscaler: requested %s, using %s, quality %d, %dx%d -> %ldx%ld", UpscaleModeName(m_mode),
+         UpscaleModeName(m_effectiveMode), m_quality, m_decoder.Width(), m_decoder.Height(), d.right - d.left,
+         d.bottom - d.top);
 }
 
 void App::ToggleFullscreen()
@@ -489,9 +909,18 @@ void App::UpdateTitle(bool force)
             swprintf(modeText, ARRAYSIZE(modeText), L"%hs -> %hs", UpscaleModeName(m_mode),
                      UpscaleModeName(m_effectiveMode));
 
-        swprintf(title, ARRAYSIZE(title), L"%ls  |  %dx%d -> %ldx%ld  |  Upscale: %ls  Q%d  |  %ls / %ls%ls  -  %ls",
-                 m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
-                 modeText, m_quality, pos, dur, m_paused ? L"  [Paused]" : L"", kAppName);
+        wchar_t audioText[32];
+        if (!m_hasAudio)
+            swprintf(audioText, ARRAYSIZE(audioText), L"No audio");
+        else if (m_muted)
+            swprintf(audioText, ARRAYSIZE(audioText), L"Muted");
+        else
+            swprintf(audioText, ARRAYSIZE(audioText), L"Vol %d%%", static_cast<int>(std::lround(m_volume * 100.0f)));
+
+        swprintf(title, ARRAYSIZE(title),
+                 L"%ls  |  %dx%d -> %ldx%ld  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls", m_fileName.c_str(),
+                 m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top, modeText, m_quality,
+                 audioText, pos, dur, m_paused ? L"  [Paused]" : L"", kAppName);
     }
     SetWindowTextW(m_hwnd, title);
 }

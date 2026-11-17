@@ -16,12 +16,13 @@ const char* UpscaleModeName(UpscaleMode mode)
     return "?";
 }
 
-bool Renderer::Init(GpuDevice* gpu)
+bool Renderer::Init(GpuDevice* gpu, bool enableRtxSdk)
 {
     m_gpu = gpu;
     m_vp.Init(gpu->Device(), gpu->VideoDevice(), gpu->VideoContext());
-    m_sdk = CreateRtxVideoSdkUpscaler(gpu->Device(), gpu->Context());
-    LogF("RTX Video SDK backend: %s", m_sdk ? "available" : "not available");
+    if (enableRtxSdk)
+        m_sdk = CreateRtxVideoSdkUpscaler(gpu->Device(), gpu->Context());
+    LogF("RTX Video SDK backend: %s", m_sdk ? "available" : (enableRtxSdk ? "not available" : "disabled (--no-sdk)"));
     return EnsurePresentTexture();
 }
 
@@ -128,7 +129,10 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
                 return true;
             }
         }
-        mode = UpscaleMode::DriverVsr; // SDK unavailable or failed: fall back.
+        // SDK unavailable or failed: fall back to plain scaling, NOT driver VSR. On the
+        // RTX 4090 test machine driver VSR fails every frame ("NVWGF2UM: Failed to run
+        // Algo 2") while the SDK is alive, ending in DXGI_ERROR_DRIVER_INTERNAL_ERROR.
+        mode = UpscaleMode::Off;
     }
 
     const bool vsr = mode == UpscaleMode::DriverVsr;
@@ -146,9 +150,8 @@ void Renderer::RenderBlack()
     m_gpu->Context()->ClearRenderTargetView(m_presentRtv.Get(), black);
 }
 
-void Renderer::Present()
+void Renderer::CopyToBackBuffer()
 {
     if (m_present && m_gpu->BackBuffer())
         m_gpu->Context()->CopyResource(m_gpu->BackBuffer(), m_present.Get());
-    m_gpu->Present();
 }

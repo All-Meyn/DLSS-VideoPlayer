@@ -13,7 +13,8 @@ using Microsoft::WRL::ComPtr;
 class GpuDevice
 {
 public:
-    bool Init(HWND hwnd);
+    // debugLayer: enable the D3D11 debug layer (needs the Windows "Graphics Tools" optional feature).
+    bool Init(HWND hwnd, bool debugLayer);
     bool Resize(UINT width, UINT height);
     void Present();
 
@@ -29,6 +30,10 @@ public:
     UINT Width() const { return m_width; }
     UINT Height() const { return m_height; }
     bool IsNvidia() const { return m_isNvidia; }
+
+    // Returns true once the driver has removed/reset the device (TDR, driver fault).
+    // Logs the reason the first time. Cheap: no GPU synchronization.
+    bool CheckDeviceRemoved();
     const std::wstring& AdapterName() const { return m_adapterName; }
 
     // RGBA (not BGRA) so the RTX Video SDK's RGBA8 output can be copied straight in.
@@ -45,5 +50,6 @@ private:
     UINT m_width = 0;
     UINT m_height = 0;
     bool m_isNvidia = false;
+    bool m_deviceRemoved = false;
     std::wstring m_adapterName;
 };

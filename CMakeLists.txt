@@ -28,7 +28,7 @@ if(NOT FFMPEG_DIR)
 endif()
 
 find_path(FFMPEG_INCLUDE_DIR libavcodec/avcodec.h PATHS "${FFMPEG_DIR}/include" REQUIRED NO_DEFAULT_PATH)
-foreach(_lib avformat avcodec avutil)
+foreach(_lib avformat avcodec avutil swresample)
     find_library(FFMPEG_${_lib}_LIB NAMES ${_lib} PATHS "${FFMPEG_DIR}/lib" REQUIRED NO_DEFAULT_PATH)
 endforeach()
 
@@ -39,12 +39,16 @@ add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
     src/App.cpp
     src/App.h
+    src/AudioPlayer.cpp
+    src/AudioPlayer.h
     src/GpuDevice.cpp
     src/GpuDevice.h
     src/VideoDecoder.cpp
     src/VideoDecoder.h
     src/VideoProcessor.cpp
     src/VideoProcessor.h
+    src/Overlay.cpp
+    src/Overlay.h
     src/Renderer.cpp
     src/Renderer.h
     src/Log.h
@@ -52,11 +56,13 @@ add_executable(DLSSVideoPlayer WIN32
     src/upscalers/RtxVideoSdkUpscaler.cpp
 )
 
-target_include_directories(DLSSVideoPlayer PRIVATE src "${FFMPEG_INCLUDE_DIR}")
+target_include_directories(DLSSVideoPlayer PRIVATE src)
+# SYSTEM: third-party headers, so their warnings don't drown out ours.
+target_include_directories(DLSSVideoPlayer SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
 target_compile_definitions(DLSSVideoPlayer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(DLSSVideoPlayer PRIVATE
-    d3d11 dxgi comdlg32 shell32
-    ${FFMPEG_avformat_LIB} ${FFMPEG_avcodec_LIB} ${FFMPEG_avutil_LIB})
+    d3d11 dxgi d2d1 dwrite comdlg32 shell32 ole32
+    ${FFMPEG_avformat_LIB} ${FFMPEG_avcodec_LIB} ${FFMPEG_avutil_LIB} ${FFMPEG_swresample_LIB})
 
 if(MSVC)
     target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /utf-8)
@@ -65,6 +71,19 @@ else()
 endif()
 
 if(DLSSVP_WITH_RTX_VIDEO_SDK)
+    # The SDK ships x64 and ARM64 (and possibly x86) builds of the same files.
+    # Keep only the x64 ones: prefer paths with an x64 folder, else drop ARM64/x86 paths.
+    function(dlssvp_keep_x64 list_var)
+        set(_all ${${list_var}})
+        set(_x64 ${_all})
+        list(FILTER _x64 INCLUDE REGEX "[/\\\\_]([xX]64|x86_64|[aA][mM][dD]64)[/\\\\]")
+        if(NOT _x64)
+            set(_x64 ${_all})
+            list(FILTER _x64 EXCLUDE REGEX "[aA][rR][mM]64|[/\\\\]([xX]86|[wW]in32)[/\\\\]")
+        endif()
+        set(${list_var} ${_x64} PARENT_SCOPE)
+    endfunction()
+
     if(NOT RTX_VIDEO_SDK_DIR)
         message(FATAL_ERROR "DLSSVP_WITH_RTX_VIDEO_SDK=ON requires -DRTX_VIDEO_SDK_DIR=<path>.")
     endif()
@@ -77,12 +96,13 @@ if(DLSSVP_WITH_RTX_VIDEO_SDK)
     endif()
     list(GET _ngx_hdr 0 _ngx_hdr)
     get_filename_component(_ngx_inc "${_ngx_hdr}" DIRECTORY)
-    target_include_directories(DLSSVideoPlayer PRIVATE "${_ngx_inc}")
+    target_include_directories(DLSSVideoPlayer SYSTEM PRIVATE "${_ngx_inc}")
 
     # Import library: nvsdk_ngx_d.lib (dynamic CRT, matches CMake's default /MD).
     # Override with -DRTX_VIDEO_SDK_LIB=<path> if your SDK names it differently.
     if(NOT RTX_VIDEO_SDK_LIB)
         file(GLOB_RECURSE _ngx_libs "${RTX_VIDEO_SDK_DIR}/nvsdk_ngx_d.lib")
+        dlssvp_keep_x64(_ngx_libs)
         if(NOT _ngx_libs)
             message(FATAL_ERROR "nvsdk_ngx_d.lib not found under ${RTX_VIDEO_SDK_DIR}; set -DRTX_VIDEO_SDK_LIB=<path to .lib>")
         endif()
@@ -96,6 +116,7 @@ if(DLSSVP_WITH_RTX_VIDEO_SDK)
     file(GLOB_RECURSE _ngx_dlls "${RTX_VIDEO_SDK_DIR}/*.dll")
     list(FILTER _ngx_dlls INCLUDE REGEX "nvngx")
     list(FILTER _ngx_dlls EXCLUDE REGEX "[/\\\\]dev[/\\\\]")
+    dlssvp_keep_x64(_ngx_dlls)
     if(_ngx_dlls)
         message(STATUS "RTX Video SDK runtime DLLs: ${_ngx_dlls}")
         add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
