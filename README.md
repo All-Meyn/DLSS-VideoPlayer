@@ -22,6 +22,7 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | On-screen controls (Direct2D/DirectWrite): seek bar, play/pause, volume, upscaler/quality, fullscreen, auto-hide, status messages | done |
 | HDR10 output on HDR displays (Windows HDR on): 10-bit PQ/BT.2020 end to end, VSR on HDR, HDR metadata, overlay at SDR white | done |
 | 10-bit SDR precision: 10-bit sources stay 10-bit through VSR and output (10-bit SDR swap chain) | done |
+| RTX Video HDR (SDK TrueHDR): SDR video converted to HDR10 on HDR displays after VSR; on by default, `H` / RTX HDR chip toggles | done |
 | HDR -> SDR tone mapping in our own shader (today: driver video processor), HLG, interlaced content, software-decode fallback | not yet |
 
 ## Requirements
@@ -71,6 +72,7 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 | `F`, `Alt+Enter`, double-click | Toggle fullscreen (`Esc` leaves) |
 | `Up` / `Down` | Volume +/- 5% |
 | `M` | Mute / unmute |
+| `H` | RTX Video HDR on/off (SDR videos on a display with Windows HDR on) |
 | Mouse | Move to show the control bar (hides after 2.5 s; cursor hides too in fullscreen). Click/drag the seek bar (hover shows the time), drag the volume slider, click the buttons. Wheel = volume. Double-click the video = fullscreen. |
 
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.

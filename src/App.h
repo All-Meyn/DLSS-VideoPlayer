@@ -46,6 +46,7 @@ private:
     void ToggleMute();
     void ApplyVolume();
     void SetQuality(int quality);
+    void ToggleTrueHdr();
 
     // On-screen controls
     void OnMouseMove(int x, int y);
@@ -86,6 +87,10 @@ private:
     bool m_deviceLost = false; // GPU device removed: rendering stops until restart
     DisplayInfo m_display;
     OutputMode m_outputMode = OutputMode::Sdr8;
+    bool m_trueHdrEnabled = true; // RTX Video HDR for SDR videos on HDR displays (H toggles)
+    bool m_trueHdrOutput = false; // current output is SDR content converted by RTX Video HDR
+    bool m_contentIsHdr10 = false; // current file is HDR10 (RTX Video HDR doesn't apply)
+    DXGI_FORMAT m_sdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 
     // Playback state
     VideoFrame m_current;

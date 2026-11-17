@@ -300,6 +300,7 @@ void App::OnKeyDown(WPARAM key)
     case VK_UP: ChangeVolume(kVolumeStep); break;
     case VK_DOWN: ChangeVolume(-kVolumeStep); break;
     case 'M': ToggleMute(); break;
+    case 'H': ToggleTrueHdr(); break;
     case VK_ESCAPE:
         if (m_fullscreen)
             ToggleFullscreen();
@@ -622,6 +623,22 @@ void App::SetQuality(int quality)
     ShowOsd(L"VSR quality %d (%ls)", m_quality, QualityName(m_quality));
 }
 
+void App::ToggleTrueHdr()
+{
+    m_trueHdrEnabled = !m_trueHdrEnabled;
+    UpdateOutputMode();
+    if (!m_trueHdrEnabled)
+        ShowOsd(L"RTX Video HDR: off");
+    else if (m_trueHdrOutput)
+        ShowOsd(L"RTX Video HDR: on");
+    else if (!m_renderer.SupportsTrueHdr())
+        ShowOsd(L"RTX Video HDR: not available");
+    else if (!m_display.hdr)
+        ShowOsd(L"RTX Video HDR: turn on Windows HDR");
+    else
+        ShowOsd(L"RTX Video HDR: on (applies to SDR videos)");
+}
+
 void App::ApplyVolume()
 {
     m_audio.SetVolume(m_muted ? 0.0f : m_volume);
@@ -665,10 +682,20 @@ void App::UpdateOutputMode()
         tenBit = desc.Format == DXGI_FORMAT_P010;
         hdrContent = IsHdr10Frame(m_current.frame.get(), desc.Format);
     }
+    m_contentIsHdr10 = hdrContent;
+    // RTX Video HDR: SDR video on an HDR display is converted to HDR10 after upscaling.
+    const bool trueHdr = m_trueHdrEnabled && m_hasVideo && m_current && !hdrContent && m_display.hdr &&
+                         m_renderer.SupportsTrueHdr() && m_outputPass.IsAvailable();
+    const DXGI_FORMAT sdrFormat = tenBit ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+    IUpscaler::SdrToHdrSettings thdrSettings; // NVIDIA defaults: contrast 100, saturation 100, middle gray 50
+    thdrSettings.maxLuminance =
+        m_display.maxNits > 0.0f ? std::clamp(static_cast<unsigned>(m_display.maxNits), 400u, 2000u) : 1000u;
+    m_renderer.SetSdrToHdrSettings(thdrSettings);
+
     OutputMode want = OutputMode::Sdr8;
     if (m_outputPass.IsAvailable())
     {
-        if (hdrContent && m_display.hdr)
+        if ((hdrContent || trueHdr) && m_display.hdr)
             want = OutputMode::Hdr10;
         else if (tenBit)
             want = OutputMode::Sdr10; // keeps 10-bit sources (and tone-mapped HDR) at 10 bits
@@ -676,18 +703,29 @@ void App::UpdateOutputMode()
     if (hdrContent)
         LogF("HDR10 video; display %ls: Windows HDR %s, peak %.0f nits, SDR white %.0f nits",
              m_display.deviceName.c_str(), m_display.hdr ? "on" : "off", m_display.maxNits, m_display.sdrWhiteNits);
-    if (want == m_outputMode)
+    if (want == m_outputMode && trueHdr == m_trueHdrOutput && (!trueHdr || sdrFormat == m_sdrFormat))
         return;
 
     // Everything holding a view of the back buffer or the presentation texture lets go first.
     m_overlay.ReleaseTarget();
     m_outputPass.ReleaseTarget();
-    const DXGI_HDR_METADATA_HDR10 metadata =
-        HdrMetadataFromFrame(want == OutputMode::Hdr10 ? m_current.frame.get() : nullptr);
+    DXGI_HDR_METADATA_HDR10 metadata =
+        HdrMetadataFromFrame(want == OutputMode::Hdr10 && !trueHdr ? m_current.frame.get() : nullptr);
+    if (trueHdr)
+    {
+        // RTX Video HDR targets the display's peak: describe that to the display.
+        metadata.MaxMasteringLuminance = thdrSettings.maxLuminance;
+        metadata.MaxContentLightLevel = static_cast<UINT16>(thdrSettings.maxLuminance);
+    }
     m_outputMode = m_gpu.SetOutputMode(want, &metadata);
-    m_renderer.SetOutputMode(m_outputMode);
+    m_trueHdrOutput = trueHdr && m_outputMode == OutputMode::Hdr10;
+    m_sdrFormat = sdrFormat;
+    m_renderer.SetOutputMode(m_outputMode, m_trueHdrOutput, sdrFormat);
     m_overlay.SetOffscreen(m_outputMode != OutputMode::Sdr8);
-    if (m_outputMode == OutputMode::Hdr10)
+    if (m_trueHdrOutput)
+        LogF("Output: HDR10 via RTX Video HDR (SDR %s source, max luminance %u nits)", tenBit ? "10-bit" : "8-bit",
+             thdrSettings.maxLuminance);
+    else if (m_outputMode == OutputMode::Hdr10)
         LogF("Output: HDR10 (mastering %u nits, MaxCLL %u, MaxFALL %u)", metadata.MaxMasteringLuminance,
              metadata.MaxContentLightLevel, metadata.MaxFrameAverageLightLevel);
     else if (m_outputMode == want)
@@ -763,6 +801,9 @@ OverlayState App::BuildOverlayState()
                       : m_mode == UpscaleMode::RtxVideoSdk ? L"RTX VSR"
                                                            : L"VSR (driver)";
     s.showQuality = m_mode == UpscaleMode::RtxVideoSdk;
+    // The RTX HDR chip only appears where it can do something: SDR video on an HDR display.
+    s.showTrueHdr = m_display.hdr && m_renderer.SupportsTrueHdr() && !m_contentIsHdr10;
+    s.trueHdrOn = m_trueHdrOutput && m_renderer.TrueHdrActive();
     s.quality = m_quality;
     s.hover = m_hover;
     const float osd = OsdOpacity(now);
@@ -849,6 +890,7 @@ void App::OnMouseDown(int x, int y)
         break;
     case OverlayPart::PlayPause: TogglePause(); break;
     case OverlayPart::Mute: ToggleMute(); break;
+    case OverlayPart::TrueHdr: ToggleTrueHdr(); break;
     case OverlayPart::Upscaler: CycleUpscaleMode(); break;
     case OverlayPart::Quality: SetQuality(m_quality % 4 + 1); break;
     case OverlayPart::Fullscreen: ToggleFullscreen(); break;
@@ -990,7 +1032,8 @@ void App::UpdateTitle(bool force)
         swprintf(title, ARRAYSIZE(title),
                  L"%ls  |  %dx%d -> %ldx%ld%ls  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls",
                  m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
-                 m_outputMode == OutputMode::Hdr10   ? L"  HDR10"
+                 m_trueHdrOutput                     ? L"  RTX HDR"
+                 : m_outputMode == OutputMode::Hdr10 ? L"  HDR10"
                  : m_outputMode == OutputMode::Sdr10 ? L"  10-bit"
                                                      : L"",
                  modeText, m_quality, audioText, pos, dur,

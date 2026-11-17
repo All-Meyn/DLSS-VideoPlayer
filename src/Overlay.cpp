@@ -195,6 +195,7 @@ Overlay::Layout Overlay::ComputeLayout() const
     l.fullscreen = button(w - 12.0f - b);
     l.quality = {l.fullscreen.left - 8.0f - 44.0f, cy - 14.0f, l.fullscreen.left - 8.0f, cy + 14.0f};
     l.upscaler = {l.quality.left - 8.0f - 104.0f, cy - 14.0f, l.quality.left - 8.0f, cy + 14.0f};
+    l.trueHdr = {l.upscaler.left - 8.0f - 84.0f, cy - 14.0f, l.upscaler.left - 8.0f, cy + 14.0f};
     return l;
 }
 
@@ -217,6 +218,7 @@ bool Overlay::Draw(const OverlayState& s)
 {
     m_lastHasAudio = s.hasAudio;
     m_lastShowQuality = s.showQuality;
+    m_lastShowTrueHdr = s.showTrueHdr;
     if (!m_context || (s.barOpacity <= 0.001f && (!s.osdText || s.osdOpacity <= 0.001f)))
         return false;
     if (!EnsureTarget())
@@ -300,6 +302,15 @@ bool Overlay::Draw(const OverlayState& s)
         swprintf(timeText, 80, L"%ls / %ls", pos, dur);
         Text(timeText, m_textLeft.Get(), l.time, kWhite, 0.9f);
 
+        // RTX Video HDR toggle (green when converting SDR -> HDR).
+        if (s.showTrueHdr)
+        {
+            Fill(l.trueHdr, s.trueHdrOn ? kAccent : kWhite, s.trueHdrOn ? 0.9f : 0.15f, 6.0f);
+            if (s.hover == OverlayPart::TrueHdr)
+                Fill(l.trueHdr, kWhite, 0.15f, 6.0f);
+            Text(L"RTX HDR", m_textCenter.Get(), l.trueHdr, s.trueHdrOn ? kBlack : kWhite, 1.0f);
+        }
+
         // Upscaler toggle (green when on) and quality level.
         Fill(l.upscaler, s.upscalerOn ? kAccent : kWhite, s.upscalerOn ? 0.9f : 0.15f, 6.0f);
         if (s.hover == OverlayPart::Upscaler)
@@ -352,6 +363,8 @@ OverlayPart Overlay::HitTest(int x, int y) const
         return OverlayPart::Mute;
     if (m_lastHasAudio && Contains(l.volumeHit, dx, dy))
         return OverlayPart::Volume;
+    if (m_lastShowTrueHdr && Contains(l.trueHdr, dx, dy))
+        return OverlayPart::TrueHdr;
     if (Contains(l.upscaler, dx, dy))
         return OverlayPart::Upscaler;
     if (m_lastShowQuality && Contains(l.quality, dx, dy))

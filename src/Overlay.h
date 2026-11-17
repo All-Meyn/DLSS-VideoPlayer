@@ -16,6 +16,7 @@ enum class OverlayPart
     PlayPause,
     Mute,
     Volume,
+    TrueHdr,
     Upscaler,
     Quality,
     Fullscreen,
@@ -38,6 +39,8 @@ struct OverlayState
     bool upscalerOn = false;
     bool showQuality = false;
     int quality = 4;
+    bool showTrueHdr = false; // RTX Video HDR toggle is meaningful (SDR video, HDR display)
+    bool trueHdrOn = false;
     OverlayPart hover = OverlayPart::None;
     const wchar_t* osdText = nullptr; // centered status message
     float osdOpacity = 0.0f;
@@ -76,7 +79,7 @@ private:
         D2D1_RECT_F gradient{}, bar{};
         D2D1_RECT_F seekTrack{}, seekHit{};
         D2D1_RECT_F play{}, mute{}, volumeTrack{}, volumeHit{}, time{};
-        D2D1_RECT_F upscaler{}, quality{}, fullscreen{};
+        D2D1_RECT_F trueHdr{}, upscaler{}, quality{}, fullscreen{};
     };
 
     bool EnsureTarget();
@@ -109,4 +112,5 @@ private:
     float m_opacity = 1.0f; // current bar opacity, applied by Fill/Text
     bool m_lastHasAudio = false;    // from the last Draw, for hit testing
     bool m_lastShowQuality = false; // from the last Draw, for hit testing
+    bool m_lastShowTrueHdr = false; // from the last Draw, for hit testing
 };

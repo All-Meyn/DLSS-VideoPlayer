@@ -30,7 +30,12 @@ public:
 
     // 10-bit modes: the presentation texture becomes RGB10A2 (read by OutputPass); in HDR10
     // it holds PQ / BT.2020, otherwise SDR BT.709.
-    void SetOutputMode(OutputMode mode);
+    // trueHdr (HDR10 only): the source is SDR and is converted with RTX Video HDR after
+    // upscaling; sdrFormat is the format of that SDR stage (RGBA8, or RGB10A2 for 10-bit sources).
+    void SetOutputMode(OutputMode mode, bool trueHdr = false, DXGI_FORMAT sdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM);
+    bool SupportsTrueHdr() const { return m_sdk && m_sdk->SupportsSdrToHdr(); }
+    void SetSdrToHdrSettings(const IUpscaler::SdrToHdrSettings& settings) { m_thdrSettings = settings; }
+    bool TrueHdrActive() const { return m_trueHdrActive; } // last frame went through RTX Video HDR
     ID3D11ShaderResourceView* PresentSrv() const { return m_presentSrv.Get(); }
 
     // Processes `frame` with the selected mode into the presentation texture.
@@ -64,5 +69,11 @@ private:
     }
     ComPtr<ID3D11Texture2D> m_sdkInput;     // source-sized RGB (SDK path)
     ComPtr<ID3D11Texture2D> m_sdkOutput;    // dest-rect-sized RGB (SDK path)
+    ComPtr<ID3D11Texture2D> m_sdrScaled;    // dest-rect-sized SDR RGB when TrueHDR runs without VSR
+    ComPtr<ID3D11Texture2D> m_thdrOutput;   // dest-rect-sized HDR10 output of TrueHDR (UAV)
+    bool m_trueHdr = false;
+    bool m_trueHdrActive = false;
+    DXGI_FORMAT m_sdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    IUpscaler::SdrToHdrSettings m_thdrSettings;
     RECT m_destRect{};
 };
