@@ -27,7 +27,7 @@ void FormatTime(double s, wchar_t* out, size_t n)
 }
 } // namespace
 
-int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile, bool d3dDebug)
+int App::Run(HINSTANCE instance, int showCmd, const Options& options)
 {
     LARGE_INTEGER freq{};
     QueryPerformanceFrequency(&freq);
@@ -52,7 +52,7 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile, b
         return 1;
     }
 
-    if (!m_gpu.Init(m_hwnd, d3dDebug) || !m_renderer.Init(&m_gpu))
+    if (!m_gpu.Init(m_hwnd, options.d3dDebug) || !m_renderer.Init(&m_gpu, !options.noSdk))
     {
         MessageBoxW(m_hwnd, L"Failed to initialize Direct3D 11 with video support.", kAppName, MB_ICONERROR);
         return 1;
@@ -66,8 +66,8 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile, b
 
     if (!m_gpu.IsNvidia())
         LogF("Warning: no NVIDIA GPU selected; RTX Video Super Resolution will be unavailable.");
-    if (!initialFile.empty())
-        OpenFile(initialFile);
+    if (!options.initialFile.empty())
+        OpenFile(options.initialFile);
     UpdateTitle(true);
 
     bool running = true;

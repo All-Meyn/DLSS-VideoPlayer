@@ -16,12 +16,13 @@ const char* UpscaleModeName(UpscaleMode mode)
     return "?";
 }
 
-bool Renderer::Init(GpuDevice* gpu)
+bool Renderer::Init(GpuDevice* gpu, bool enableRtxSdk)
 {
     m_gpu = gpu;
     m_vp.Init(gpu->Device(), gpu->VideoDevice(), gpu->VideoContext());
-    m_sdk = CreateRtxVideoSdkUpscaler(gpu->Device(), gpu->Context());
-    LogF("RTX Video SDK backend: %s", m_sdk ? "available" : "not available");
+    if (enableRtxSdk)
+        m_sdk = CreateRtxVideoSdkUpscaler(gpu->Device(), gpu->Context());
+    LogF("RTX Video SDK backend: %s", m_sdk ? "available" : (enableRtxSdk ? "not available" : "disabled (--no-sdk)"));
     return EnsurePresentTexture();
 }
 

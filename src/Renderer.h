@@ -22,7 +22,8 @@ const char* UpscaleModeName(UpscaleMode mode);
 class Renderer
 {
 public:
-    bool Init(GpuDevice* gpu);
+    // enableRtxSdk=false skips creating the RTX Video SDK backend (--no-sdk).
+    bool Init(GpuDevice* gpu, bool enableRtxSdk);
     void OnResize();
 
     bool HasRtxVideoSdk() const { return m_sdk != nullptr; }

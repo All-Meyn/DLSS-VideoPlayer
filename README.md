@@ -72,6 +72,7 @@ Super resolution only runs when the video is being **enlarged**: e.g. a 1080p vi
 falls back to "Off". Use fullscreen on a 1440p/4K display, or play 480p-1080p content, to see it.
 Diagnostics go to `%TEMP%\DLSSVideoPlayer\DLSSVideoPlayer.log` (recreated on each start) and to the debugger
 output (VS Code Debug Console, Visual Studio Output window or Sysinternals DebugView).
+Run with `--no-sdk` to skip the RTX Video SDK backend (driver VSR / Off only).
 Run with `--d3d-debug` to enable the Direct3D 11 debug layer (needs the Windows "Graphics Tools" optional
 feature); its messages appear in the debugger output / DebugView. If the GPU driver resets the device, the
 player logs the reason and stops rendering; restart it.

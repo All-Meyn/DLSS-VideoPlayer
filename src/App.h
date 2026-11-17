@@ -13,7 +13,13 @@
 class App
 {
 public:
-    int Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile, bool d3dDebug);
+    struct Options
+    {
+        std::wstring initialFile;
+        bool d3dDebug = false; // --d3d-debug: enable the D3D11 debug layer
+        bool noSdk = false;    // --no-sdk: don't create the RTX Video SDK backend
+    };
+    int Run(HINSTANCE instance, int showCmd, const Options& options);
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
