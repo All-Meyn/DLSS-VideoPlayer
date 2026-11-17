@@ -33,6 +33,7 @@ private:
     bool AdvancePlayback(); // returns true if the displayed frame changed
     void DecodeNext();
     void RenderNow();
+    void LogUpscalerStateIfChanged();
     void UpdateTitle(bool force);
 
     double Now() const;
@@ -64,6 +65,10 @@ private:
     UpscaleMode m_mode = UpscaleMode::DriverVsr;
     UpscaleMode m_effectiveMode = UpscaleMode::Off;
     int m_quality = 4;
+    // Last upscaler state written to the log (-1 = nothing logged yet for this file).
+    int m_loggedMode = -1;
+    int m_loggedEffectiveMode = -1;
+    int m_loggedQuality = -1;
 
     // Window state
     bool m_fullscreen = false;

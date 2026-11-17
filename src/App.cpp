@@ -273,6 +273,7 @@ void App::OpenFile(const std::wstring& path)
 
     m_hasVideo = true;
     m_paused = false;
+    m_loggedMode = -1; // log the upscaler state again for the new file
     AnchorClock(m_current.pts);
     m_dirty = true;
     UpdateTitle(true);
@@ -437,6 +438,7 @@ void App::RenderNow()
     {
         if (!m_renderer.RenderFrame(m_current, m_decoder.SampleAspectRatio(), m_mode, m_quality, m_effectiveMode))
             m_renderer.RenderBlack();
+        LogUpscalerStateIfChanged();
     }
     else
     {
@@ -444,6 +446,24 @@ void App::RenderNow()
     }
     m_renderer.Present();
     m_dirty = false;
+}
+
+// Logs only when the requested mode, the mode actually used, or the quality changes,
+// so it is cheap to call every rendered frame.
+void App::LogUpscalerStateIfChanged()
+{
+    const int mode = static_cast<int>(m_mode);
+    const int effective = static_cast<int>(m_effectiveMode);
+    if (mode == m_loggedMode && effective == m_loggedEffectiveMode && m_quality == m_loggedQuality)
+        return;
+    m_loggedMode = mode;
+    m_loggedEffectiveMode = effective;
+    m_loggedQuality = m_quality;
+
+    const RECT d = m_renderer.LastDestRect();
+    LogF("Upscaler: requested %s, using %s, quality %d, %dx%d -> %ldx%ld", UpscaleModeName(m_mode),
+         UpscaleModeName(m_effectiveMode), m_quality, m_decoder.Width(), m_decoder.Height(), d.right - d.left,
+         d.bottom - d.top);
 }
 
 void App::ToggleFullscreen()
