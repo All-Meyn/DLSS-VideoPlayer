@@ -129,7 +129,10 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
                 return true;
             }
         }
-        mode = UpscaleMode::DriverVsr; // SDK unavailable or failed: fall back.
+        // SDK unavailable or failed: fall back to plain scaling, NOT driver VSR. On the
+        // RTX 4090 test machine driver VSR fails every frame ("NVWGF2UM: Failed to run
+        // Algo 2") while the SDK is alive, ending in DXGI_ERROR_DRIVER_INTERNAL_ERROR.
+        mode = UpscaleMode::Off;
     }
 
     const bool vsr = mode == UpscaleMode::DriverVsr;

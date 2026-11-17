@@ -63,7 +63,7 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 | `O` / drag & drop | Open a file |
 | `Space` | Play / pause (at end: replay) |
 | `Left` / `Right` | Seek -5 s / +5 s (`Shift`: 30 s) |
-| `U` | Cycle upscaler: Off -> RTX VSR (driver) -> RTX Video SDK (if built and initialized) |
+| `U` | Toggle upscaler: Off <-> RTX Video SDK when the SDK is active; otherwise Off <-> RTX VSR (driver) |
 | `1`-`4` | VSR quality: Low / Medium / High / Ultra (RTX Video SDK backend) |
 | `F`, `Alt+Enter`, double-click | Toggle fullscreen (`Esc` leaves) |
 

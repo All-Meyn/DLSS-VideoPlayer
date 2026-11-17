@@ -417,14 +417,13 @@ void App::SeekTo(double target)
 
 void App::CycleUpscaleMode()
 {
-    switch (m_mode)
-    {
-    case UpscaleMode::Off: m_mode = UpscaleMode::DriverVsr; break;
-    case UpscaleMode::DriverVsr:
-        m_mode = m_renderer.HasRtxVideoSdk() ? UpscaleMode::RtxVideoSdk : UpscaleMode::Off;
-        break;
-    case UpscaleMode::RtxVideoSdk: m_mode = UpscaleMode::Off; break;
-    }
+    // With the SDK active the cycle is Off <-> RTX Video SDK: driver VSR is left out
+    // because it crashes the device when used alongside the SDK (see Renderer.cpp).
+    // Without the SDK (not built, failed to start, or --no-sdk): Off <-> driver VSR.
+    if (m_mode != UpscaleMode::Off)
+        m_mode = UpscaleMode::Off;
+    else
+        m_mode = m_renderer.HasRtxVideoSdk() ? UpscaleMode::RtxVideoSdk : UpscaleMode::DriverVsr;
     m_dirty = true;
 }
 
