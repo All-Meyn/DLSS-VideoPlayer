@@ -13,7 +13,7 @@
 class App
 {
 public:
-    int Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile);
+    int Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile, bool d3dDebug);
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -35,6 +35,7 @@ private:
     void RenderNow();
     void LogUpscalerStateIfChanged();
     void UpdateTitle(bool force);
+    bool HandleDeviceLost();
 
     double Now() const;
     double MediaTime() const;
@@ -45,6 +46,7 @@ private:
     Renderer m_renderer;
     VideoDecoder m_decoder;
     bool m_initialized = false;
+    bool m_deviceLost = false; // GPU device removed: rendering stops until restart
 
     // Playback state
     VideoFrame m_current;

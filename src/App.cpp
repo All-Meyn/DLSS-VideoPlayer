@@ -27,7 +27,7 @@ void FormatTime(double s, wchar_t* out, size_t n)
 }
 } // namespace
 
-int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
+int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile, bool d3dDebug)
 {
     LARGE_INTEGER freq{};
     QueryPerformanceFrequency(&freq);
@@ -52,7 +52,7 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
         return 1;
     }
 
-    if (!m_gpu.Init(m_hwnd) || !m_renderer.Init(&m_gpu))
+    if (!m_gpu.Init(m_hwnd, d3dDebug) || !m_renderer.Init(&m_gpu))
     {
         MessageBoxW(m_hwnd, L"Failed to initialize Direct3D 11 with video support.", kAppName, MB_ICONERROR);
         return 1;
@@ -84,7 +84,7 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
         if (!running)
             break;
 
-        if (m_minimized)
+        if (m_minimized || m_deviceLost)
         {
             WaitMessage();
             continue;
@@ -100,6 +100,8 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
         else
             WaitMessage(); // paused / idle: sleep until input
 
+        if (HandleDeviceLost())
+            continue;
         UpdateTitle(false);
     }
 
@@ -432,7 +434,7 @@ void App::CycleUpscaleMode()
 
 void App::RenderNow()
 {
-    if (!m_initialized)
+    if (!m_initialized || m_deviceLost)
         return;
     if (m_hasVideo && m_current)
     {
@@ -446,6 +448,23 @@ void App::RenderNow()
     }
     m_renderer.Present();
     m_dirty = false;
+}
+
+// Stops rendering (instead of failing every frame) once the driver has removed the device.
+// Recovering would mean recreating the device, decoder and upscalers; for now: restart.
+bool App::HandleDeviceLost()
+{
+    if (m_deviceLost || !m_gpu.CheckDeviceRemoved())
+        return m_deviceLost;
+    m_deviceLost = true;
+    m_paused = true;
+    LogF("Rendering stopped after device removal (last upscaler: requested %s, using %s)", UpscaleModeName(m_mode),
+         UpscaleModeName(m_effectiveMode));
+    MessageBoxW(m_hwnd,
+                L"The GPU driver reset the graphics device, so playback has stopped.\n\n"
+                L"Details are in %TEMP%\\DLSSVideoPlayer\\DLSSVideoPlayer.log. Please restart the player.",
+                kAppName, MB_ICONERROR);
+    return true;
 }
 
 // Logs only when the requested mode, the mode actually used, or the quality changes,
