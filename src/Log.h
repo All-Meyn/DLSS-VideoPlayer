@@ -7,16 +7,16 @@
 #include <share.h>
 #include <string>
 
-// Log file: %TEMP%\DLSSVideoPlayer\DLSSVideoPlayer.log (recreated on each start).
+// Log file: %TEMP%\VSRPlayer\VSRPlayer.log (recreated on each start).
 // Opened once on first use; shared-read so it can be viewed while the player runs.
 inline FILE* LogFile()
 {
     static FILE* file = [] {
         wchar_t tmp[MAX_PATH] = {};
         GetTempPathW(MAX_PATH, tmp);
-        std::wstring dir = std::wstring(tmp) + L"DLSSVideoPlayer";
+        std::wstring dir = std::wstring(tmp) + L"VSRPlayer";
         CreateDirectoryW(dir.c_str(), nullptr);
-        return _wfsopen((dir + L"\\DLSSVideoPlayer.log").c_str(), L"w", _SH_DENYNO);
+        return _wfsopen((dir + L"\\VSRPlayer.log").c_str(), L"w", _SH_DENYNO);
     }();
     return file;
 }
@@ -31,7 +31,7 @@ inline void LogF(const char* fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    OutputDebugStringA("[DLSSVP] ");
+    OutputDebugStringA("[VSRPlayer] ");
     OutputDebugStringA(buf);
     OutputDebugStringA("\n");
 

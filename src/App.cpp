@@ -13,8 +13,8 @@
 
 namespace
 {
-constexpr wchar_t kWindowClass[] = L"DLSSVideoPlayerWindow";
-constexpr wchar_t kAppName[] = L"DLSS-VideoPlayer";
+constexpr wchar_t kWindowClass[] = L"VSRPlayerWindow";
+constexpr wchar_t kAppName[] = L"VSRPlayer";
 constexpr double kSeekStep = 5.0;
 constexpr double kSeekStepLarge = 30.0;
 constexpr int kMaxCatchUpFrames = 8;
@@ -1161,7 +1161,7 @@ bool App::HandleDeviceLost()
          UpscaleModeName(m_effectiveMode));
     MessageBoxW(m_hwnd,
                 L"The GPU driver reset the graphics device, so playback has stopped.\n\n"
-                L"Details are in %TEMP%\\DLSSVideoPlayer\\DLSSVideoPlayer.log. Please restart the player.",
+                L"Details are in %TEMP%\\VSRPlayer\\VSRPlayer.log. Please restart the player.",
                 kAppName, MB_ICONERROR);
     return true;
 }
