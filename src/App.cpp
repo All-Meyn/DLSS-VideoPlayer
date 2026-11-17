@@ -45,7 +45,12 @@ int App::Run(HINSTANCE instance, int showCmd, const std::wstring& initialFile)
     m_hwnd = CreateWindowExW(0, kWindowClass, kAppName, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
                              nullptr, nullptr, instance, this);
     if (!m_hwnd)
+    {
+        wchar_t msg[128];
+        swprintf(msg, ARRAYSIZE(msg), L"Could not create the main window (error %lu).", GetLastError());
+        MessageBoxW(nullptr, msg, kAppName, MB_ICONERROR);
         return 1;
+    }
 
     if (!m_gpu.Init(m_hwnd) || !m_renderer.Init(&m_gpu))
     {
@@ -111,7 +116,11 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_NCCREATE)
     {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        auto* creating = static_cast<App*>(cs->lpCreateParams);
+        // Store the handle now: CreateWindowExW hasn't returned yet, and HandleMessage
+        // passes m_hwnd to DefWindowProcW (a null hwnd there makes window creation fail).
+        creating->m_hwnd = hwnd;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(creating));
     }
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (app)
