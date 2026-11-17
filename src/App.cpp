@@ -78,6 +78,7 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
         return 1;
     }
     m_initialized = true;
+    m_settings.Load();
     m_overlay.Init(&m_gpu, m_hwnd); // optional: without it the player is keyboard-only
     if (!m_outputPass.Init(&m_gpu))
         LogF("HDR output unavailable (shader setup failed); HDR video will be shown as SDR");
@@ -133,6 +134,7 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
 
     CloseVideo();
     UpdateKeepAwake(); // releases the request (no video any more)
+    m_settings.Save();
     return 0;
 }
 
@@ -235,10 +237,11 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_CAPTURECHANGED:
         // Capture taken away (e.g. Alt+Tab) mid-drag: cancel without seeking.
-        if (reinterpret_cast<HWND>(lp) != m_hwnd && (m_draggingSeek || m_draggingVolume))
+        if (reinterpret_cast<HWND>(lp) != m_hwnd && (m_draggingSeek || m_draggingVolume || m_draggingTune >= 0))
         {
             m_draggingSeek = false;
             m_draggingVolume = false;
+            m_draggingTune = -1;
             m_seekPreview = -1.0;
             m_overlayDirty = true;
         }
@@ -286,6 +289,24 @@ LRESULT App::HandleMessage(UINT msg, WPARAM wp, LPARAM lp)
 void App::OnKeyDown(WPARAM key)
 {
     const bool shift = GetKeyState(VK_SHIFT) < 0;
+    if (m_tuneOpen)
+    {
+        // While the tuning panel is open the arrows edit it (Shift = fine steps), Esc/T close it.
+        const unsigned values[3] = {m_settings.thdrContrast, m_settings.thdrSaturation, m_settings.thdrMiddleGray};
+        const int step = shift ? 1 : 5;
+        switch (key)
+        {
+        case VK_UP: m_tuneRow = (m_tuneRow + 2) % 3; m_overlayDirty = true; return;
+        case VK_DOWN: m_tuneRow = (m_tuneRow + 1) % 3; m_overlayDirty = true; return;
+        case VK_LEFT:
+            SetTuneValue(m_tuneRow, static_cast<unsigned>(std::max(0, static_cast<int>(values[m_tuneRow]) - step)));
+            return;
+        case VK_RIGHT: SetTuneValue(m_tuneRow, values[m_tuneRow] + static_cast<unsigned>(step)); return;
+        case VK_ESCAPE:
+        case 'T': ToggleTunePanel(); return;
+        default: break;
+        }
+    }
     switch (key)
     {
     case VK_SPACE: TogglePause(); break;
@@ -301,6 +322,7 @@ void App::OnKeyDown(WPARAM key)
     case VK_DOWN: ChangeVolume(-kVolumeStep); break;
     case 'M': ToggleMute(); break;
     case 'H': ToggleTrueHdr(); break;
+    case 'T': ToggleTunePanel(); break;
     case VK_ESCAPE:
         if (m_fullscreen)
             ToggleFullscreen();
@@ -639,6 +661,45 @@ void App::ToggleTrueHdr()
         ShowOsd(L"RTX Video HDR: on (applies to SDR videos)");
 }
 
+void App::ToggleTunePanel()
+{
+    if (!m_tuneOpen && !m_renderer.SupportsTrueHdr())
+    {
+        ShowOsd(L"RTX Video HDR not available");
+        return;
+    }
+    m_tuneOpen = !m_tuneOpen;
+    if (!m_tuneOpen)
+        m_settings.Save(); // persist when the panel closes (and on exit)
+    m_lastMouseMove = Now();
+    m_overlayDirty = true;
+}
+
+void App::SetTuneValue(int row, unsigned value)
+{
+    switch (row)
+    {
+    case 0: m_settings.thdrContrast = std::min(value, 200u); break;
+    case 1: m_settings.thdrSaturation = std::min(value, 200u); break;
+    default: m_settings.thdrMiddleGray = std::clamp(value, 10u, 100u); break;
+    }
+    m_tuneRow = std::clamp(row, 0, 2);
+    ApplyTrueHdrSettings();
+    if (m_trueHdrOutput)
+        m_dirty = true; // re-process the current frame with the new settings
+    m_overlayDirty = true;
+}
+
+void App::ApplyTrueHdrSettings()
+{
+    IUpscaler::SdrToHdrSettings s;
+    s.contrast = m_settings.thdrContrast;
+    s.saturation = m_settings.thdrSaturation;
+    s.middleGray = m_settings.thdrMiddleGray;
+    s.maxLuminance = m_thdrMaxLuminance;
+    m_renderer.SetSdrToHdrSettings(s);
+}
+
 void App::ApplyVolume()
 {
     m_audio.SetVolume(m_muted ? 0.0f : m_volume);
@@ -654,8 +715,13 @@ void App::PresentFrame()
     {
         // 10-bit / HDR10: the overlay is drawn offscreen and blended in by the output shader.
         const bool overlayDrawn = m_overlay.IsAvailable() && m_overlay.Draw(BuildOverlayState());
-        m_outputPass.Run(m_renderer.PresentSrv(), overlayDrawn ? m_overlay.OffscreenSrv() : nullptr,
-                         m_display.sdrWhiteNits, m_outputMode == OutputMode::Hdr10);
+        OutputPass::Params params;
+        params.mode = m_outputMode == OutputMode::Hdr10 ? OutputPass::Mode::Hdr10
+                      : m_toneMap                       ? OutputPass::Mode::ToneMap
+                                                        : OutputPass::Mode::Sdr;
+        params.sdrWhiteNits = m_display.sdrWhiteNits;
+        params.srcPeakNits = m_contentPeakNits;
+        m_outputPass.Run(m_renderer.PresentSrv(), overlayDrawn ? m_overlay.OffscreenSrv() : nullptr, params);
     }
     else
     {
@@ -687,10 +753,9 @@ void App::UpdateOutputMode()
     const bool trueHdr = m_trueHdrEnabled && m_hasVideo && m_current && !hdrContent && m_display.hdr &&
                          m_renderer.SupportsTrueHdr() && m_outputPass.IsAvailable();
     const DXGI_FORMAT sdrFormat = tenBit ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
-    IUpscaler::SdrToHdrSettings thdrSettings; // NVIDIA defaults: contrast 100, saturation 100, middle gray 50
-    thdrSettings.maxLuminance =
+    m_thdrMaxLuminance =
         m_display.maxNits > 0.0f ? std::clamp(static_cast<unsigned>(m_display.maxNits), 400u, 2000u) : 1000u;
-    m_renderer.SetSdrToHdrSettings(thdrSettings);
+    ApplyTrueHdrSettings();
 
     OutputMode want = OutputMode::Sdr8;
     if (m_outputPass.IsAvailable())
@@ -698,12 +763,15 @@ void App::UpdateOutputMode()
         if ((hdrContent || trueHdr) && m_display.hdr)
             want = OutputMode::Hdr10;
         else if (tenBit)
-            want = OutputMode::Sdr10; // keeps 10-bit sources (and tone-mapped HDR) at 10 bits
+            want = OutputMode::Sdr10; // 10-bit SDR, and HDR10 files tone-mapped by OutputPass
     }
+    // HDR10 files stay PQ through VSR; on an SDR output OutputPass tone-maps them (BT.2390).
+    const bool pqVideo = hdrContent && want != OutputMode::Sdr8;
     if (hdrContent)
         LogF("HDR10 video; display %ls: Windows HDR %s, peak %.0f nits, SDR white %.0f nits",
              m_display.deviceName.c_str(), m_display.hdr ? "on" : "off", m_display.maxNits, m_display.sdrWhiteNits);
-    if (want == m_outputMode && trueHdr == m_trueHdrOutput && (!trueHdr || sdrFormat == m_sdrFormat))
+    if (want == m_outputMode && trueHdr == m_trueHdrOutput && pqVideo == m_pqVideo &&
+        (!trueHdr || sdrFormat == m_sdrFormat))
         return;
 
     // Everything holding a view of the back buffer or the presentation texture lets go first.
@@ -714,17 +782,30 @@ void App::UpdateOutputMode()
     if (trueHdr)
     {
         // RTX Video HDR targets the display's peak: describe that to the display.
-        metadata.MaxMasteringLuminance = thdrSettings.maxLuminance;
-        metadata.MaxContentLightLevel = static_cast<UINT16>(thdrSettings.maxLuminance);
+        metadata.MaxMasteringLuminance = m_thdrMaxLuminance;
+        metadata.MaxContentLightLevel = static_cast<UINT16>(m_thdrMaxLuminance);
+    }
+    if (hdrContent)
+    {
+        // Tone-mapping source peak: MaxCLL, else the mastering display's peak, else 1000 nits.
+        const DXGI_HDR_METADATA_HDR10 content = HdrMetadataFromFrame(m_current.frame.get());
+        m_contentPeakNits = content.MaxContentLightLevel > 0 ? static_cast<float>(content.MaxContentLightLevel)
+                            : content.MaxMasteringLuminance > 0 ? static_cast<float>(content.MaxMasteringLuminance)
+                                                                : 1000.0f;
+        m_contentPeakNits = std::clamp(m_contentPeakNits, 100.0f, 10000.0f);
     }
     m_outputMode = m_gpu.SetOutputMode(want, &metadata);
     m_trueHdrOutput = trueHdr && m_outputMode == OutputMode::Hdr10;
+    m_pqVideo = hdrContent && m_outputMode != OutputMode::Sdr8;
+    m_toneMap = m_pqVideo && m_outputMode == OutputMode::Sdr10;
     m_sdrFormat = sdrFormat;
-    m_renderer.SetOutputMode(m_outputMode, m_trueHdrOutput, sdrFormat);
+    m_renderer.SetOutputMode(m_outputMode, m_trueHdrOutput, sdrFormat, m_pqVideo);
     m_overlay.SetOffscreen(m_outputMode != OutputMode::Sdr8);
     if (m_trueHdrOutput)
         LogF("Output: HDR10 via RTX Video HDR (SDR %s source, max luminance %u nits)", tenBit ? "10-bit" : "8-bit",
-             thdrSettings.maxLuminance);
+             m_thdrMaxLuminance);
+    else if (m_toneMap)
+        LogF("Output: SDR 10-bit, BT.2390 tone mapping (content peak %.0f nits -> 203 nits)", m_contentPeakNits);
     else if (m_outputMode == OutputMode::Hdr10)
         LogF("Output: HDR10 (mastering %u nits, MaxCLL %u, MaxFALL %u)", metadata.MaxMasteringLuminance,
              metadata.MaxContentLightLevel, metadata.MaxFrameAverageLightLevel);
@@ -739,7 +820,7 @@ bool App::BarWanted(double now) const
 {
     if (!m_hasVideo || !m_overlay.IsAvailable())
         return false;
-    if (m_paused || m_draggingSeek || m_draggingVolume)
+    if (m_paused || m_draggingSeek || m_draggingVolume || m_tuneOpen || m_draggingTune >= 0)
         return true;
     // Stays up while the mouse moves or rests on the bar itself.
     return m_mouseInside && (now - m_lastMouseMove < kBarHideDelay || m_hover != OverlayPart::None);
@@ -804,6 +885,11 @@ OverlayState App::BuildOverlayState()
     // The RTX HDR chip only appears where it can do something: SDR video on an HDR display.
     s.showTrueHdr = m_display.hdr && m_renderer.SupportsTrueHdr() && !m_contentIsHdr10;
     s.trueHdrOn = m_trueHdrOutput && m_renderer.TrueHdrActive();
+    s.tuneOpen = m_tuneOpen;
+    s.tuneRow = m_tuneRow;
+    s.tuneValues[0] = m_settings.thdrContrast;
+    s.tuneValues[1] = m_settings.thdrSaturation;
+    s.tuneValues[2] = m_settings.thdrMiddleGray;
     s.quality = m_quality;
     s.hover = m_hover;
     const float osd = OsdOpacity(now);
@@ -856,6 +942,12 @@ void App::OnMouseMove(int x, int y)
         return;
 
     const double duration = m_decoder.Duration();
+    if (m_draggingTune >= 0)
+    {
+        const float f = m_overlay.TuneFraction(m_draggingTune, x);
+        SetTuneValue(m_draggingTune, m_draggingTune == 2 ? 10u + static_cast<unsigned>(std::lround(f * 90.0f))
+                                                         : static_cast<unsigned>(std::lround(f * 200.0f)));
+    }
     if (m_draggingSeek)
         m_seekPreview = m_overlay.SeekFraction(x) * duration;
     else if (m_draggingVolume)
@@ -875,6 +967,28 @@ void App::OnMouseDown(int x, int y)
     m_hover = m_overlay.HitTest(x, y);
     switch (m_hover)
     {
+    case OverlayPart::TuneContrast:
+    case OverlayPart::TuneSaturation:
+    case OverlayPart::TuneMiddleGray:
+    {
+        const int row = static_cast<int>(m_hover) - static_cast<int>(OverlayPart::TuneContrast);
+        SetCapture(m_hwnd);
+        m_draggingTune = row;
+        const float f = m_overlay.TuneFraction(row, x);
+        SetTuneValue(row, row == 2 ? 10u + static_cast<unsigned>(std::lround(f * 90.0f))
+                                   : static_cast<unsigned>(std::lround(f * 200.0f)));
+        break;
+    }
+    case OverlayPart::TuneReset:
+        m_settings.thdrContrast = 100;
+        m_settings.thdrSaturation = 100;
+        SetTuneValue(2, 50);
+        ShowOsd(L"RTX Video HDR: default tuning");
+        break;
+    case OverlayPart::None:
+        if (m_tuneOpen)
+            ToggleTunePanel(); // click on the video closes the panel
+        break;
     case OverlayPart::Seek:
         if (m_decoder.Duration() > 0.0)
         {
@@ -916,6 +1030,11 @@ void App::OnMouseUp()
     else if (m_draggingVolume)
     {
         m_draggingVolume = false;
+        ReleaseCapture();
+    }
+    else if (m_draggingTune >= 0)
+    {
+        m_draggingTune = -1;
         ReleaseCapture();
     }
     m_overlayDirty = true;
@@ -1033,6 +1152,7 @@ void App::UpdateTitle(bool force)
                  L"%ls  |  %dx%d -> %ldx%ld%ls  |  Upscale: %ls  Q%d  |  %ls  |  %ls / %ls%ls  -  %ls",
                  m_fileName.c_str(), m_decoder.Width(), m_decoder.Height(), d.right - d.left, d.bottom - d.top,
                  m_trueHdrOutput                     ? L"  RTX HDR"
+                 : m_toneMap                         ? L"  HDR\u2192SDR"
                  : m_outputMode == OutputMode::Hdr10 ? L"  HDR10"
                  : m_outputMode == OutputMode::Sdr10 ? L"  10-bit"
                                                      : L"",

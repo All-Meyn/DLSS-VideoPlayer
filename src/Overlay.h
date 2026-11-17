@@ -20,6 +20,11 @@ enum class OverlayPart
     Upscaler,
     Quality,
     Fullscreen,
+    TunePanel,      // RTX Video HDR tuning panel background
+    TuneContrast,   // tuning rows: TuneContrast + row index
+    TuneSaturation,
+    TuneMiddleGray,
+    TuneReset,
 };
 
 // Everything the overlay needs to draw one frame. Filled by App; plain data, no ownership.
@@ -41,6 +46,10 @@ struct OverlayState
     int quality = 4;
     bool showTrueHdr = false; // RTX Video HDR toggle is meaningful (SDR video, HDR display)
     bool trueHdrOn = false;
+    // RTX Video HDR tuning panel (T)
+    bool tuneOpen = false;
+    int tuneRow = 0; // keyboard-selected row: 0 contrast, 1 saturation, 2 middle gray
+    unsigned tuneValues[3] = {100, 100, 50};
     OverlayPart hover = OverlayPart::None;
     const wchar_t* osdText = nullptr; // centered status message
     float osdOpacity = 0.0f;
@@ -71,6 +80,7 @@ public:
     OverlayPart HitTest(int x, int y) const;
     double SeekFraction(int x) const;   // 0..1 along the seek bar
     float VolumeFraction(int x) const;  // 0..1 along the volume slider
+    float TuneFraction(int row, int x) const; // 0..1 along a tuning slider
 
 private:
     struct Layout
@@ -80,6 +90,7 @@ private:
         D2D1_RECT_F seekTrack{}, seekHit{};
         D2D1_RECT_F play{}, mute{}, volumeTrack{}, volumeHit{}, time{};
         D2D1_RECT_F trueHdr{}, upscaler{}, quality{}, fullscreen{};
+        D2D1_RECT_F tunePanel{}, tuneRows[3]{}, tuneTracks[3]{}, tuneReset{};
     };
 
     bool EnsureTarget();
@@ -113,4 +124,5 @@ private:
     bool m_lastHasAudio = false;    // from the last Draw, for hit testing
     bool m_lastShowQuality = false; // from the last Draw, for hit testing
     bool m_lastShowTrueHdr = false; // from the last Draw, for hit testing
+    bool m_lastTuneOpen = false;    // from the last Draw, for hit testing
 };

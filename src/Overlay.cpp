@@ -196,6 +196,20 @@ Overlay::Layout Overlay::ComputeLayout() const
     l.quality = {l.fullscreen.left - 8.0f - 44.0f, cy - 14.0f, l.fullscreen.left - 8.0f, cy + 14.0f};
     l.upscaler = {l.quality.left - 8.0f - 104.0f, cy - 14.0f, l.quality.left - 8.0f, cy + 14.0f};
     l.trueHdr = {l.upscaler.left - 8.0f - 84.0f, cy - 14.0f, l.upscaler.left - 8.0f, cy + 14.0f};
+
+    // Tuning panel: bottom-right, just above the control bar.
+    const float pw = 320.0f, rowH = 34.0f, titleH = 40.0f, footH = 44.0f;
+    const float ph = titleH + 3.0f * rowH + footH;
+    l.tunePanel = {w - 16.0f - pw, l.bar.top - 8.0f - ph, w - 16.0f, l.bar.top - 8.0f};
+    for (int i = 0; i < 3; ++i)
+    {
+        const float top = l.tunePanel.top + titleH + static_cast<float>(i) * rowH;
+        l.tuneRows[i] = {l.tunePanel.left + 8.0f, top, l.tunePanel.right - 8.0f, top + rowH};
+        const float mid = top + rowH * 0.5f;
+        l.tuneTracks[i] = {l.tunePanel.left + 120.0f, mid - 2.0f, l.tunePanel.right - 64.0f, mid + 2.0f};
+    }
+    l.tuneReset = {l.tunePanel.right - 8.0f - 80.0f, l.tunePanel.bottom - 8.0f - 28.0f, l.tunePanel.right - 8.0f,
+                   l.tunePanel.bottom - 8.0f};
     return l;
 }
 
@@ -219,6 +233,7 @@ bool Overlay::Draw(const OverlayState& s)
     m_lastHasAudio = s.hasAudio;
     m_lastShowQuality = s.showQuality;
     m_lastShowTrueHdr = s.showTrueHdr;
+    m_lastTuneOpen = s.tuneOpen;
     if (!m_context || (s.barOpacity <= 0.001f && (!s.osdText || s.osdOpacity <= 0.001f)))
         return false;
     if (!EnsureTarget())
@@ -327,6 +342,51 @@ bool Overlay::Draw(const OverlayState& s)
         // Fullscreen.
         highlight(OverlayPart::Fullscreen, l.fullscreen);
         Text(s.fullscreen ? kIconWindowed : kIconFullscreen, m_icons.Get(), l.fullscreen, kWhite, 1.0f);
+
+        if (s.tuneOpen)
+        {
+            static const wchar_t* const kLabels[3] = {L"Contrast", L"Saturation", L"Middle gray"};
+            static const unsigned kMin[3] = {0, 0, 10};
+            static const unsigned kMax[3] = {200, 200, 100};
+
+            Fill(l.tunePanel, kBlack, 0.8f, 10.0f);
+            const D2D1_RECT_F title{l.tunePanel.left + 16.0f, l.tunePanel.top, l.tunePanel.right - 16.0f,
+                                    l.tunePanel.top + 40.0f};
+            Text(L"RTX Video HDR", m_textCenter.Get(), {title.left, title.top, title.left + 110.0f, title.bottom},
+                 kWhite, 1.0f);
+            if (!s.trueHdrOn)
+                Text(L"inactive", m_textLeft.Get(), {title.right - 56.0f, title.top, title.right, title.bottom}, kWhite,
+                     0.5f);
+
+            for (int i = 0; i < 3; ++i)
+            {
+                const D2D1_RECT_F& row = l.tuneRows[i];
+                const D2D1_RECT_F& track = l.tuneTracks[i];
+                if (s.tuneRow == i)
+                    Fill(row, kWhite, 0.10f, 6.0f);
+                else if (s.hover == static_cast<OverlayPart>(static_cast<int>(OverlayPart::TuneContrast) + i))
+                    Fill(row, kWhite, 0.06f, 6.0f);
+                Text(kLabels[i], m_textLeft.Get(), {row.left + 8.0f, row.top, track.left - 8.0f, row.bottom}, kWhite,
+                     0.9f);
+
+                const unsigned v = std::clamp(s.tuneValues[i], kMin[i], kMax[i]);
+                const float f = static_cast<float>(v - kMin[i]) / static_cast<float>(kMax[i] - kMin[i]);
+                const float tw = track.right - track.left;
+                Fill(track, kWhite, 0.25f, 2.0f);
+                Fill({track.left, track.top, track.left + f * tw, track.bottom}, kAccent, 1.0f, 2.0f);
+                m_brush->SetColor(D2D1::ColorF(kWhite, m_opacity));
+                m_context->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(track.left + f * tw, (track.top + track.bottom) * 0.5f), 6.0f, 6.0f),
+                    m_brush.Get());
+
+                wchar_t value[8];
+                swprintf(value, 8, L"%u", v);
+                Text(value, m_textCenter.Get(), {track.right + 8.0f, row.top, row.right, row.bottom}, kWhite, 1.0f);
+            }
+
+            Fill(l.tuneReset, kWhite, s.hover == OverlayPart::TuneReset ? 0.3f : 0.15f, 6.0f);
+            Text(L"Reset", m_textCenter.Get(), l.tuneReset, kWhite, 1.0f);
+        }
     }
 
     if (s.osdText && s.osdOpacity > 0.001f)
@@ -355,6 +415,15 @@ OverlayPart Overlay::HitTest(int x, int y) const
     const float s = Scale();
     const float dx = static_cast<float>(x) / s, dy = static_cast<float>(y) / s;
     const Layout l = ComputeLayout();
+    if (m_lastTuneOpen && Contains(l.tunePanel, dx, dy))
+    {
+        for (int i = 0; i < 3; ++i)
+            if (Contains(l.tuneRows[i], dx, dy))
+                return static_cast<OverlayPart>(static_cast<int>(OverlayPart::TuneContrast) + i);
+        if (Contains(l.tuneReset, dx, dy))
+            return OverlayPart::TuneReset;
+        return OverlayPart::TunePanel;
+    }
     if (Contains(l.seekHit, dx, dy))
         return OverlayPart::Seek;
     if (Contains(l.play, dx, dy))
@@ -384,4 +453,9 @@ double Overlay::SeekFraction(int x) const
 float Overlay::VolumeFraction(int x) const
 {
     return Fraction(ComputeLayout().volumeTrack, static_cast<float>(x) / Scale());
+}
+
+float Overlay::TuneFraction(int row, int x) const
+{
+    return Fraction(ComputeLayout().tuneTracks[std::clamp(row, 0, 2)], static_cast<float>(x) / Scale());
 }

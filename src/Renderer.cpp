@@ -26,9 +26,10 @@ bool Renderer::Init(GpuDevice* gpu, bool enableRtxSdk)
     return EnsurePresentTexture();
 }
 
-void Renderer::SetOutputMode(OutputMode mode, bool trueHdr, DXGI_FORMAT sdrFormat)
+void Renderer::SetOutputMode(OutputMode mode, bool trueHdr, DXGI_FORMAT sdrFormat, bool pqVideo)
 {
     m_mode = mode;
+    m_pqVideo = pqVideo && mode != OutputMode::Sdr8; // PQ needs the 10-bit presentation texture
     m_trueHdr = trueHdr && mode == OutputMode::Hdr10;
     m_trueHdrActive = false;
     m_sdrFormat = sdrFormat;
@@ -132,7 +133,7 @@ bool Renderer::RenderFrame(const VideoFrame& vf, AVRational sar, UpscaleMode mod
     // TrueHDR last, as in NVIDIA's samples.
     const bool trueHdr = m_trueHdr && IsHdr() && m_sdk && m_sdk->SupportsSdrToHdr();
     const DXGI_FORMAT stageFormat = trueHdr ? m_sdrFormat : PresentFormat();
-    const bool vpHdr = IsHdr() && !trueHdr; // the video processor writes PQ only for HDR10 sources
+    const bool vpHdr = m_pqVideo && !trueHdr; // the video processor writes PQ only for HDR10 sources
     const RECT outRect{0, 0, destW, destH};
     ID3D11Texture2D* scaled = nullptr; // dest-sized result; null when the VP wrote straight into m_present
     effectiveMode = UpscaleMode::Off;

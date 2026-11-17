@@ -17,8 +17,10 @@ cbuffer Constants : register(b0)
 {
     float SdrWhiteNits;
     uint  UseOverlay;
-    uint  Hdr;
-    float Padding;
+    uint  Mode;          // 0 = SDR, 1 = HDR10, 2 = PQ -> SDR tone mapping
+    float SrcPeakNits;
+    float DstPeakNits;
+    float3 Padding;
 };
 
 float4 VSMain(uint id : SV_VertexID) : SV_Position
@@ -46,23 +48,69 @@ float3 LinearToPq(float3 lin)
     return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
 }
 
-// BT.709 -> BT.2020 primaries (linear light).
+float PqToLinear1(float pq) { return PqToLinear(pq.xxx).x; }
+float LinearToPq1(float lin) { return LinearToPq(lin.xxx).x; }
+
+// BT.709 <-> BT.2020 primaries (linear light).
 static const float3x3 Bt709To2020 = {
     0.6274040, 0.3292820, 0.0433136,
     0.0690970, 0.9195400, 0.0113612,
     0.0163916, 0.0880132, 0.8955950
 };
+static const float3x3 Bt2020To709 = {
+     1.6604910, -0.5876411, -0.0728499,
+    -0.1245505,  1.1328999, -0.0083494,
+    -0.0181508, -0.1005789,  1.1187297
+};
+
+// ITU-R BT.2390 EETF (black level 0): maps PQ value e in [0, srcPeakPq] to [0, dstPeakPq]
+// with a Hermite-spline knee, leaving everything below the knee untouched.
+float Bt2390Eetf(float e, float srcPeakPq, float dstPeakPq)
+{
+    float e1 = e / srcPeakPq;
+    float maxLum = dstPeakPq / srcPeakPq;
+    float ks = 1.5 * maxLum - 0.5;
+    float e2 = e1;
+    if (e1 > ks)
+    {
+        float t = (e1 - ks) / (1.0 - ks);
+        float t2 = t * t;
+        float t3 = t2 * t;
+        e2 = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * maxLum;
+    }
+    return min(e2, 1.0) * srcPeakPq;
+}
+
+float3 ToneMapPqToSdr(float3 pq)
+{
+    float3 nits = PqToLinear(pq) * 10000.0; // BT.2020 linear, in nits
+    float peak = max(max(nits.r, nits.g), nits.b);
+    if (peak > 0.0 && SrcPeakNits > DstPeakNits)
+    {
+        // Tone-map the brightest channel and scale all three by the same factor (keeps hue).
+        float srcPeakPq = LinearToPq1(SrcPeakNits / 10000.0);
+        float dstPeakPq = LinearToPq1(DstPeakNits / 10000.0);
+        float peakPq = LinearToPq1(min(peak, SrcPeakNits) / 10000.0);
+        float mapped = PqToLinear1(Bt2390Eetf(peakPq, srcPeakPq, dstPeakPq)) * 10000.0;
+        nits *= mapped / peak;
+    }
+    float3 sdr = saturate(mul(Bt2020To709, nits) / DstPeakNits); // gamut clip to BT.709
+    return pow(sdr, 1.0 / 2.2);
+}
 
 float4 PSMain(float4 pos : SV_Position) : SV_Target
 {
     int3 p = int3(int2(pos.xy), 0);
     float3 video = VideoTex.Load(p).rgb;
+    if (Mode == 2)
+        video = ToneMapPqToSdr(video);
+
     if (UseOverlay != 0)
     {
         float4 ui = UiTex.Load(p);
         if (ui.a > 0.0)
         {
-            if (Hdr != 0)
+            if (Mode == 1)
             {
                 float3 uiLinear = mul(Bt709To2020, pow(ui.rgb / ui.a, 2.2)) * (SdrWhiteNits / 10000.0);
                 float3 videoLinear = PqToLinear(video);
@@ -78,12 +126,14 @@ float4 PSMain(float4 pos : SV_Position) : SV_Target
 }
 )hlsl";
 
-struct Constants
+struct Constants // matches the HLSL cbuffer (2 x 16 bytes)
 {
     float sdrWhiteNits;
     UINT useOverlay;
-    UINT hdr;
-    float padding;
+    UINT mode;
+    float srcPeakNits;
+    float dstPeakNits;
+    float padding[3];
 };
 
 ComPtr<ID3DBlob> Compile(const char* entry, const char* target)
@@ -131,8 +181,7 @@ void OutputPass::ReleaseTarget()
     m_rtv.Reset();
 }
 
-void OutputPass::Run(ID3D11ShaderResourceView* video, ID3D11ShaderResourceView* overlay, float sdrWhiteNits,
-                     bool hdr)
+void OutputPass::Run(ID3D11ShaderResourceView* video, ID3D11ShaderResourceView* overlay, const Params& params)
 {
     if (!m_ps || !video || !m_gpu->BackBuffer())
         return;
@@ -143,7 +192,8 @@ void OutputPass::Run(ID3D11ShaderResourceView* video, ID3D11ShaderResourceView* 
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (SUCCEEDED(ctx->Map(m_constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
-        const Constants c{sdrWhiteNits, overlay ? 1u : 0u, hdr ? 1u : 0u, 0.0f};
+        const Constants c{params.sdrWhiteNits, overlay ? 1u : 0u, static_cast<UINT>(params.mode),
+                          params.srcPeakNits, params.dstPeakNits, {0.0f, 0.0f, 0.0f}};
         memcpy(mapped.pData, &c, sizeof(c));
         ctx->Unmap(m_constants.Get(), 0);
     }

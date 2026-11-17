@@ -55,6 +55,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/OutputPass.h
     src/Renderer.cpp
     src/Renderer.h
+    src/Settings.cpp
+    src/Settings.h
     src/Log.h
     src/upscalers/IUpscaler.h
     src/upscalers/RtxVideoSdkUpscaler.cpp
@@ -65,7 +67,7 @@ target_include_directories(DLSSVideoPlayer PRIVATE src)
 target_include_directories(DLSSVideoPlayer SYSTEM PRIVATE "${FFMPEG_INCLUDE_DIR}")
 target_compile_definitions(DLSSVideoPlayer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_link_libraries(DLSSVideoPlayer PRIVATE
-    d3d11 dxgi d2d1 dwrite d3dcompiler comdlg32 shell32 ole32
+    d3d11 dxgi d2d1 dwrite d3dcompiler comdlg32 shell32 ole32 uuid
     ${FFMPEG_avformat_LIB} ${FFMPEG_avcodec_LIB} ${FFMPEG_avutil_LIB} ${FFMPEG_swresample_LIB})
 
 if(MSVC)

@@ -6,6 +6,7 @@
 #include "Overlay.h"
 #include "OutputPass.h"
 #include "Renderer.h"
+#include "Settings.h"
 #include "VideoDecoder.h"
 
 #include <string>
@@ -47,6 +48,9 @@ private:
     void ApplyVolume();
     void SetQuality(int quality);
     void ToggleTrueHdr();
+    void ToggleTunePanel();
+    void SetTuneValue(int row, unsigned value);
+    void ApplyTrueHdrSettings();
 
     // On-screen controls
     void OnMouseMove(int x, int y);
@@ -91,6 +95,14 @@ private:
     bool m_trueHdrOutput = false; // current output is SDR content converted by RTX Video HDR
     bool m_contentIsHdr10 = false; // current file is HDR10 (RTX Video HDR doesn't apply)
     DXGI_FORMAT m_sdrFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    bool m_pqVideo = false;          // HDR10 source kept as PQ in the presentation texture
+    bool m_toneMap = false;          // ...and tone-mapped to SDR by OutputPass (Windows HDR off)
+    float m_contentPeakNits = 1000.0f;
+    unsigned m_thdrMaxLuminance = 1000;
+    Settings m_settings;             // persisted (RTX Video HDR tuning)
+    bool m_tuneOpen = false;         // RTX Video HDR tuning panel (T)
+    int m_tuneRow = 0;
+    int m_draggingTune = -1;
 
     // Playback state
     VideoFrame m_current;
