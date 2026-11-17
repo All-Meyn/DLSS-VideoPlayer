@@ -1,4 +1,4 @@
-# DLSS-VideoPlayer
+# VSRPlayer
 
 A Windows video player that upscales video with NVIDIA's AI super resolution on RTX GPUs.
 
@@ -24,7 +24,7 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 | 10-bit SDR precision: 10-bit sources stay 10-bit through VSR and output (10-bit SDR swap chain) | done |
 | RTX Video HDR (SDK TrueHDR): SDR video converted to HDR10 on HDR displays after VSR; on by default, `H` / RTX HDR chip toggles | done |
 | HDR10 -> SDR tone mapping (BT.2390 EETF on max RGB, content peak from MaxCLL / mastering metadata -> 203 nits, 10-bit output) when Windows HDR is off | done |
-| RTX Video HDR tuning panel (`T`): contrast, saturation, middle gray; saved in `%APPDATA%\\DLSSVideoPlayer\\settings.ini` | done |
+| RTX Video HDR tuning panel (`T`): contrast, saturation, middle gray; saved in `%APPDATA%\\VSRPlayer\\settings.ini` | done |
 | Audio track selection (`A` / Audio menu) | done |
 | Subtitles: embedded text (SRT/ASS/WebVTT/mov_text, shown as plain outlined text) and image (PGS/VobSub) tracks, external `.srt/.ass/.ssa/.vtt` next to the video; `S` / Subs menu | done |
 | Robustness: audio follows default-device changes / device loss; GPU device reset recovery (rebuild + resume) | done |
@@ -49,13 +49,13 @@ A Windows video player that upscales video with NVIDIA's AI super resolution on 
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg
 REM Visual Studio / Build Tools 2022: use -G "Visual Studio 17 2022" instead
 cmake --build build --config Release
-build\Release\DLSSVideoPlayer.exe path\to\video.mkv
+build\Release\VSRPlayer.exe path\to\video.mkv
 ```
 
 With the RTX Video SDK (v1.1):
 
 ```bat
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg -DDLSSVP_WITH_RTX_VIDEO_SDK=ON
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DFFMPEG_DIR=C:/libs/ffmpeg -DVSRPLAYER_WITH_RTX_VIDEO_SDK=ON
 REM The SDK is expected at C:/libs/RTXVSR (the extracted SDK folder); override with -DRTX_VIDEO_SDK_DIR=<path>
 ```
 
@@ -63,7 +63,7 @@ The FFmpeg DLLs are copied next to the executable after each build. With the SDK
 finds the NGX headers (`nvsdk_ngx_helpers_vsr.h`), links `nvsdk_ngx_d.lib`, and copies the SDK's
 `nvngx*.dll` runtime files next to the executable; the configure output prints what it found. If your
 SDK names the library differently, pass `-DRTX_VIDEO_SDK_LIB=<path to .lib>`.
-NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
+NGX writes its logs to `%TEMP%\VSRPlayer`.
 
 ## Controls
 
@@ -85,7 +85,7 @@ NGX writes its logs to `%TEMP%\DLSSVideoPlayer`.
 The title bar shows source -> output resolution, requested -> actually used upscaler, time and state.
 Super resolution only runs when the video is being **enlarged**: e.g. a 1080p video in a 1080p window
 falls back to "Off". Use fullscreen on a 1440p/4K display, or play 480p-1080p content, to see it.
-Diagnostics go to `%TEMP%\DLSSVideoPlayer\DLSSVideoPlayer.log` (recreated on each start) and to the debugger
+Diagnostics go to `%TEMP%\VSRPlayer\VSRPlayer.log` (recreated on each start) and to the debugger
 output (VS Code Debug Console, Visual Studio Output window or Sysinternals DebugView).
 Run with `--no-sdk` to skip the RTX Video SDK backend (driver VSR / Off only).
 Run with `--d3d-debug` to enable the Direct3D 11 debug layer (needs the Windows "Graphics Tools" optional

@@ -1,6 +1,7 @@
 #pragma once
 
-// Settings remembered between runs, stored in %APPDATA%\DLSSVideoPlayer\settings.ini.
+// Settings remembered between runs, stored in %APPDATA%\VSRPlayer\settings.ini
+// (read from the pre-rename %APPDATA%\DLSSVideoPlayer\settings.ini if that is all there is).
 struct Settings
 {
     // RTX Video HDR (TrueHDR) tuning; NVIDIA's defaults.

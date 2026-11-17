@@ -45,5 +45,5 @@ public:
 };
 
 // Returns nullptr when the player was built without the RTX Video SDK
-// (CMake option DLSSVP_WITH_RTX_VIDEO_SDK=OFF) or the SDK failed to initialize.
+// (CMake option VSRPLAYER_WITH_RTX_VIDEO_SDK=OFF) or the SDK failed to initialize.
 std::unique_ptr<IUpscaler> CreateRtxVideoSdkUpscaler(ID3D11Device* device, ID3D11DeviceContext* context);

@@ -11,7 +11,7 @@
 
 #include "Log.h"
 
-#if defined(DLSSVP_HAS_RTX_VIDEO_SDK)
+#if defined(VSRPLAYER_HAS_RTX_VIDEO_SDK)
 
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers_truehdr.h>
@@ -38,7 +38,7 @@ std::wstring AppDataPath()
     // NGX writes logs here; it must be writable.
     wchar_t tmp[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tmp);
-    std::wstring path = std::wstring(tmp) + L"DLSSVideoPlayer";
+    std::wstring path = std::wstring(tmp) + L"VSRPlayer";
     CreateDirectoryW(path.c_str(), nullptr);
     return path;
 }
