@@ -30,6 +30,8 @@ constexpr UINT kMsgAudioDeviceChanged = WM_APP + 1;
 constexpr UINT_PTR kTimerAudioReopen = 1;
 constexpr UINT kAudioReopenDelayMs = 400; // let device changes settle (they come in bursts)
 constexpr double kMinSecondsBetweenRecoveries = 10.0;
+constexpr double kResumeMinPosition = 30.0;  // don't offer resume for files barely started
+constexpr double kResumeOfferSeconds = 8.0;  // how long the "Resume from ...?" offer stays
 
 const wchar_t* QualityName(int q)
 {
@@ -84,6 +86,9 @@ int App::Run(HINSTANCE instance, int showCmd, const Options& options)
     }
     m_initialized = true;
     m_settings.Load();
+    m_volume = static_cast<float>(m_settings.volumePercent) / 100.0f;
+    m_muted = m_settings.muted;
+    m_history.Load();
     m_overlay.Init(&m_gpu, m_hwnd); // optional: without it the player is keyboard-only
     if (!m_outputPass.Init(&m_gpu))
         LogF("HDR output unavailable (shader setup failed); HDR video will be shown as SDR");
@@ -370,6 +375,15 @@ void App::OnKeyDown(WPARAM key)
         }
         break;
     case 'O': ShowOpenDialog(); break;
+    case VK_RETURN:
+        if (m_resumeOffer > 0.0 && Now() < m_resumeOfferUntil)
+        {
+            const double target = m_resumeOffer;
+            m_resumeOffer = 0.0;
+            SeekTo(target);
+            ShowSeekOsd();
+        }
+        break;
     default: return;
     }
     UpdateTitle(true);
@@ -395,6 +409,8 @@ void App::ShowOpenDialog()
 void App::CloseVideo()
 {
     // Release frames before the decoder so surfaces return to their pool first.
+    SaveFileState(); // before anything is torn down
+    m_resumeOffer = 0.0;
     m_audio.Close();
     m_hasAudio = false;
     m_externalSubs.clear();
@@ -430,6 +446,8 @@ void App::OpenFile(const std::wstring& path)
     m_fileName = slash == std::wstring::npos ? path : path.substr(slash + 1);
     m_filePath = path;
     m_externalSubs = LoadExternalSubtitles(path);
+    const FileState* saved = m_history.Find(path);
+    m_savedState = saved ? *saved : FileState{};
     BuildTrackMenus(); // before decoding, so a default subtitle track sees packets from the start
 
     DecodeNext();
@@ -448,10 +466,23 @@ void App::OpenFile(const std::wstring& path)
     m_paused = false;
     m_loggedMode = -1; // log the upscaler state again for the new file
     UpdateOutputMode(); // HDR10 file on an HDR display -> HDR10 output
-    m_hasAudio = m_audio.Open(path, m_current.pts, false, m_muted ? 0.0f : m_volume);
+    const int audioStream =
+        m_audioChoice >= 0 ? m_decoder.AudioStreams()[static_cast<size_t>(m_audioChoice)].index : -1;
+    m_hasAudio = m_audio.Open(path, m_current.pts, false, m_muted ? 0.0f : m_volume, audioStream);
     AnchorClock(m_current.pts);
     m_dirty = true;
     UpdateTitle(true);
+
+    // Offer to continue where this file was left (Enter accepts).
+    const double duration = m_decoder.Duration();
+    if (m_savedState.position >= kResumeMinPosition && (duration <= 0.0 || m_savedState.position < duration))
+    {
+        wchar_t pos[32];
+        FormatTime(m_savedState.position, pos, ARRAYSIZE(pos));
+        m_resumeOffer = m_savedState.position;
+        m_resumeOfferUntil = Now() + kResumeOfferSeconds;
+        ShowOsdFor(kResumeOfferSeconds, L"Resume from %ls?  Press Enter", pos);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +785,8 @@ void App::ApplyTrueHdrSettings()
 void App::ApplyVolume()
 {
     m_audio.SetVolume(m_muted ? 0.0f : m_volume);
+    m_settings.volumePercent = static_cast<unsigned>(std::lround(m_volume * 100.0f));
+    m_settings.muted = m_muted; // saved on exit
 }
 
 // ---------------------------------------------------------------------------
@@ -972,9 +1005,22 @@ void App::ShowOsd(const wchar_t* format, ...)
 {
     va_list args;
     va_start(args, format);
-    vswprintf(m_osdText, ARRAYSIZE(m_osdText), format, args);
+    ShowOsdV(kOsdDuration, format, args);
     va_end(args);
-    m_osdUntil = Now() + kOsdDuration;
+}
+
+void App::ShowOsdFor(double seconds, const wchar_t* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    ShowOsdV(seconds, format, args);
+    va_end(args);
+}
+
+void App::ShowOsdV(double seconds, const wchar_t* format, va_list args)
+{
+    vswprintf(m_osdText, ARRAYSIZE(m_osdText), format, args);
+    m_osdUntil = Now() + seconds;
     m_overlayDirty = true;
 }
 
@@ -1170,6 +1216,60 @@ bool App::HandleDeviceLost()
 // Audio / subtitle tracks
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Per-file memory
+// ---------------------------------------------------------------------------
+
+void App::SaveFileState()
+{
+    if (!m_hasVideo || m_filePath.empty())
+        return;
+    FileState st;
+    st.path = m_filePath;
+    const double pos = MediaTime();
+    const double duration = m_decoder.Duration();
+    // Finished (last 60 s, or last 5% of short files) or barely started: next time from the start.
+    const bool nearEnd = (m_eof && !m_next) || (duration > 0.0 && duration - pos < std::min(60.0, duration * 0.05));
+    st.position = (pos < kResumeMinPosition || nearEnd) ? 0.0 : pos;
+    st.audioStream =
+        m_audioChoice >= 0 ? m_decoder.AudioStreams()[static_cast<size_t>(m_audioChoice)].index : -1;
+    st.subtitle = SubtitleChoiceKey();
+    m_history.Update(std::move(st));
+    m_history.Save();
+}
+
+std::wstring App::SubtitleChoiceKey() const
+{
+    const auto& embedded = m_decoder.SubtitleStreams();
+    if (m_subChoice <= 0)
+        return L"off";
+    if (m_subChoice <= static_cast<int>(embedded.size()))
+        return L"s:" + std::to_wstring(embedded[static_cast<size_t>(m_subChoice - 1)].index);
+    const size_t ext = static_cast<size_t>(m_subChoice) - embedded.size() - 1;
+    return ext < m_externalSubs.size() ? L"x:" + m_externalSubs[ext].label : L"off";
+}
+
+int App::SubtitleChoiceFromKey(const std::wstring& key) const
+{
+    if (key == L"off")
+        return 0;
+    const auto& embedded = m_decoder.SubtitleStreams();
+    if (key.rfind(L"s:", 0) == 0)
+    {
+        const int stream = _wtoi(key.c_str() + 2);
+        for (size_t i = 0; i < embedded.size(); ++i)
+            if (embedded[i].index == stream)
+                return static_cast<int>(i) + 1;
+    }
+    else if (key.rfind(L"x:", 0) == 0)
+    {
+        for (size_t i = 0; i < m_externalSubs.size(); ++i)
+            if (m_externalSubs[i].label == key.substr(2))
+                return static_cast<int>(embedded.size() + i) + 1;
+    }
+    return -1; // unknown / no longer there: use the file's default
+}
+
 void App::BuildTrackMenus()
 {
     m_audioMenu.clear();
@@ -1182,9 +1282,13 @@ void App::BuildTrackMenus()
     for (size_t i = 0; i < audio.size(); ++i)
     {
         m_audioMenu.push_back(audio[i].label);
-        if (audio[i].index == m_decoder.DefaultAudioStream())
+        if (audio[i].index == m_decoder.DefaultAudioStream() && m_audioChoice < 0)
             m_audioChoice = static_cast<int>(i);
     }
+    // The track picked last time for this file wins over the default.
+    for (size_t i = 0; i < audio.size(); ++i)
+        if (m_savedState.audioStream >= 0 && audio[i].index == m_savedState.audioStream)
+            m_audioChoice = static_cast<int>(i);
 
     // Subtitles: Off, embedded tracks, external files. Default: a forced track, else one the
     // file marks as default, else off.
@@ -1202,7 +1306,10 @@ void App::BuildTrackMenus()
     for (const ExternalSubtitle& ext : m_externalSubs)
         m_subMenu.push_back(L"External: " + ext.label);
 
-    const int initial = forced > 0 ? forced : flagged > 0 ? flagged : 0;
+    int initial = forced > 0 ? forced : flagged > 0 ? flagged : 0;
+    const int remembered = SubtitleChoiceFromKey(m_savedState.subtitle);
+    if (remembered >= 0)
+        initial = remembered; // what you picked last time for this file
     if (initial > 0)
         SelectSubtitleTrack(initial, false); // at open: nothing decoded yet, no re-seek needed
 }

@@ -12,6 +12,7 @@
 namespace
 {
 constexpr wchar_t kSection[] = L"RtxVideoHdr";
+constexpr wchar_t kPlayerSection[] = L"Player";
 
 std::wstring SettingsPath(const wchar_t* folderName, bool createFolder)
 {
@@ -33,17 +34,18 @@ bool FileExists(const std::wstring& path)
 constexpr wchar_t kFolder[] = L"VSRPlayer";
 constexpr wchar_t kOldFolder[] = L"DLSSVideoPlayer"; // name before the rename
 
-unsigned ReadUInt(const std::wstring& path, const wchar_t* key, unsigned fallback, unsigned lo, unsigned hi)
+unsigned ReadUInt(const std::wstring& path, const wchar_t* key, unsigned fallback, unsigned lo, unsigned hi,
+                  const wchar_t* section = kSection)
 {
-    const UINT v = GetPrivateProfileIntW(kSection, key, static_cast<INT>(fallback), path.c_str());
+    const UINT v = GetPrivateProfileIntW(section, key, static_cast<INT>(fallback), path.c_str());
     return std::clamp(static_cast<unsigned>(v), lo, hi);
 }
 
-void WriteUInt(const std::wstring& path, const wchar_t* key, unsigned value)
+void WriteUInt(const std::wstring& path, const wchar_t* key, unsigned value, const wchar_t* section = kSection)
 {
     wchar_t buf[16];
     swprintf(buf, 16, L"%u", value);
-    WritePrivateProfileStringW(kSection, key, buf, path.c_str());
+    WritePrivateProfileStringW(section, key, buf, path.c_str());
 }
 } // namespace
 
@@ -65,6 +67,8 @@ void Settings::Load()
     thdrContrast = ReadUInt(path, L"Contrast", thdrContrast, 0, 200);
     thdrSaturation = ReadUInt(path, L"Saturation", thdrSaturation, 0, 200);
     thdrMiddleGray = ReadUInt(path, L"MiddleGray", thdrMiddleGray, 10, 100);
+    volumePercent = ReadUInt(path, L"Volume", volumePercent, 0, 100, kPlayerSection);
+    muted = ReadUInt(path, L"Muted", muted ? 1u : 0u, 0, 1, kPlayerSection) != 0;
 }
 
 void Settings::Save() const
@@ -75,4 +79,12 @@ void Settings::Save() const
     WriteUInt(path, L"Contrast", thdrContrast);
     WriteUInt(path, L"Saturation", thdrSaturation);
     WriteUInt(path, L"MiddleGray", thdrMiddleGray);
+    WriteUInt(path, L"Volume", volumePercent, kPlayerSection);
+    WriteUInt(path, L"Muted", muted ? 1u : 0u, kPlayerSection);
+}
+
+std::wstring AppDataFolder()
+{
+    const std::wstring ini = SettingsPath(kFolder, true);
+    return ini.empty() ? std::wstring() : ini.substr(0, ini.find_last_of(L'\\'));
 }
